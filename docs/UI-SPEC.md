@@ -1,6 +1,6 @@
 # AgentHub UI 规格（UI-SPEC）
 
-> 状态基准：2026-10-20 16:24。**以 `src/**` 的真实实现为准**：第二轮新增 `/health` 页、SkillDetail 健康面板（审计/依赖/影响/验证证据）、Agents 版本健康、Dashboard/Skills 健康摘要、Plan 影响摘要；当前 11 条路由/12 视图/20 组件，`pnpm build` 与 **7 files / 29 tests** 通过。GUI 已在隔离 home 下完成人工运行验收（截图见 [docs/evidence/](evidence/)），自动化回归待补。
+> 状态基准：2026-10-20 17:32。**以 `src/**` 的真实实现为准**：0.4.0 新增 Skills「中央库 / 扫描发现」Tabs、批量导入中央库与 Dashboard/Agents/Onboarding 入口；此前 /health 页、SkillDetail 健康面板、Agents 版本健康、Dashboard/Skills 健康摘要、Plan 影响摘要均在。当前 11 条路由/12 视图/21 组件，`pnpm build` 与 **8 files / 38 tests** 通过。GUI 已在隔离 home 下完成人工运行验收（截图见 [docs/evidence/](evidence/)），自动化回归待补。
 > 关联：[PRD.md](PRD.md)、[ARCHITECTURE.md](ARCHITECTURE.md)、[SECURITY.md](SECURITY.md)、[TEST-PLAN.md](TEST-PLAN.md)
 
 ---
@@ -24,7 +24,7 @@
 |---|---|---|---|
 | overview | 仪表盘 Dashboard | `/dashboard` | `app_dashboard`、`app_check_changes` |
 | capabilities | Agent | `/agents` | `agents_list`、`app_scan`、`agents_update_paths` |
-| capabilities | 技能库 Skills | `/skills`、`/skills/:id` | `skills_list`、`skills_get`、`skills_import`、`skills_plan_install`、`skills_plan_uninstall` |
+| capabilities | 技能库 Skills | `/skills`（`?tab=discovered` 深链）、`/skills/:id` | `skills_list`、`skills_get`、`skills_import`、`skills_import_scan`、`skills_plan_install`、`skills_plan_uninstall`、`app_scan` |
 | capabilities | 能力矩阵 Matrix | `/matrix` | `skills_list` + `agents_list`（前端组合 `matrixCellState`） |
 | capabilities | MCP Servers | `/mcp` | `mcp_list`、`mcp_discover`、`mcp_upsert`、`mcp_import`、`mcp_plan_distribute`、`mcp_plan_remove`、`mcp_*_secret` |
 | capabilities | 插件 Plugins | `/plugins` | `plugins_sync`（只读） |
@@ -97,7 +97,9 @@
 
 ### 2.3 Skills（`nav.skills` + 详情 `/skills/:id`）
 
-**列表**：
+**Tabs**：`中央库 (N)` / `扫描发现 (M)`（`skills.tabs.*`）；`/skills?tab=discovered` 可直接打开发现 Tab。切换 Tab 不丢选择（选择按 group key 独立于分页）。
+
+**中央库列表**：
 
 | 列/元素 | 内容 | 数据 |
 |---|---|---|
@@ -125,7 +127,27 @@
 4. 更新（选择新版本 → plan_install(versionId)）。
 5. 回滚（跳到 Activity 对应操作）。
 
-**空态**：库为空 → 「导入第一个技能」；扫描到的 Agent 技能可一键带入导入对话框。
+**空态**：库为空 → 「导入第一个技能」；扫描到的 Agent 技能可在「扫描发现」Tab 一键批量入库。
+
+### 2.3b 扫描发现（Skills → 扫描发现 Tab）
+
+**目的**：把本机各 Agent 目录里「已存在但未入库」的技能做成可筛选、可批量导入的清单，解决「技能库只有两个」的可见性问题。
+
+| 区块/列 | 内容 | 数据 |
+|---|---|---|
+| 摘要 | 扫描时间、有效发现数、总组数 | `ScanReport` + 前端分组 |
+| 分组 | 按 `(slug, contentHash)` 跨 Agent 合并；同名不同内容分行 | `groupDiscoveredSkills` |
+| 列 | 技能、状态（已在库/未入库/只读来源/含无效项）、Agent、来源、体积 | `DiscoveredGroup` |
+| 展开 | 描述、路径、Agent、issues、hash、代表路径、rootSources、版本、文件数 | 同上 |
+| 搜索/筛选 | 名称/slug/Agent/路径；全部/未入库/已在库/只读来源；显示只读来源开关 | `filterDiscoveredGroups` |
+| 分页 | 每页 100，加载更多；选择与分页独立 | `pageDiscoveredGroups` |
+| 选择 | 全选当前筛选/清除；不可选已在库/无效；只读仅显示开关打开时可选 | `selectionSummary` |
+| 确认 | 数量、体积、涉及 Agent、将导入路径；说明只复制到中央库、不改 Agent 目录；只读来源需勾选 | `ScanImportRequest` |
+| 结果 | imported / skippedExisting / skippedDuplicate / skippedReadOnly / skippedLimit / failed | `ScanImportResult` |
+
+**入口**：Dashboard 在存在未入库非只读技能时显示真实计数卡并链接 `/skills?tab=discovered`；Agents 页有「查看扫描发现」；Onboarding 扫描步骤显示可导入数量。
+**只读来源语义**：`builtin/marketplace/workspace/connector` 默认不参与批量导入；UI 必须显示「只读来源」并解释「可能属于 Agent 市场/内置缓存」，勾选后才复制到中央库。
+**禁止**：不得自动导入、不得修改 Agent 目录、不得静默包含只读来源。
 **禁止**：前端编辑 SKILL.md（无后端接口）；未导入的技能直接显示为「库内技能」。
 
 ### 2.4 Matrix（`nav.matrix`，额外页面）
@@ -489,17 +511,17 @@ Profiles → 应用 → `profiles_plan_apply`（可能返回多个 plan 合并�
 | 入口 | `index.html`、`vite.config.ts`（端口 1420，jsdom + vitest） | ✅ |
 | 路由 | `src/router.ts` | ✅ 已实现：hash 路由、10 条页面路由 + `/` 重定向、导航表与 `⌘1–9` 顺序 |
 | App 根组件 | `src/App.vue`、`src/main.ts` | ✅ 已实现：Pinia/i18n/router 挂载、启动 bootstrap、onboarding/shell 切换、错误横幅 |
-| 页面 | `src/pages/*` | ✅ 12 个视图（10 条导航路由 + 技能详情 + onboarding；含 HealthView）；隔离 home GUI 人工验收通过（§6.5） |
-| 组件 | `src/components/*` | ✅ 20 个组件：新增 HealthStatusBadge、SkillHealthPanel、UpdateImpactSummary；其余同第一轮 |
-| 测试 | `src/lib/__tests__/*.spec.ts`、`src/__tests__/*.spec.ts` | ✅ **7 文件 / 29 测试**通过（新增 health-ui/health） |
+| 页面 | `src/pages/*` | ✅ 12 个视图（含 HealthView；Skills 页含中央库/扫描发现 Tabs）；隔离 home GUI 人工验收通过（§6.5） |
+| 组件 | `src/components/*` | ✅ 21 个组件：新增 ScanDiscoveryPanel、HealthStatusBadge、SkillHealthPanel、UpdateImpactSummary；其余同第一轮 |
+| 测试 | `src/lib/__tests__/*.spec.ts`、`src/__tests__/*.spec.ts` | ✅ **8 文件 / 38 测试**通过（新增 health-ui/health/discovered） |
 
-> 构建/测试状态快照（2026-10-20 16:48）：`pnpm build` 通过；`pnpm test` **7 文件 / 29 测试**通过；完整 `pnpm tauri build` 已产出 0.3.0 `AgentHub.app`（7.50 MiB）与 `AgentHub_0.3.0_aarch64.dmg`（3.96 MiB，16:47–16:48），`/Applications/AgentHub.app` 已覆盖安装 0.3.0；首次 DMG 尝试因沙箱 hdiutil 权限失败，完整权限重跑成功；未签名/未公证。页面视觉以最终组件为准；token、状态映射、命令签名与文案 key 不应另造一套。
+> 构建/测试状态快照（2026-10-20 17:37）：`pnpm build` 通过；`pnpm test` **8 文件 / 38 测试**通过；完整 `pnpm tauri build` 已产出 0.4.0 `AgentHub.app`（7.52 MiB）与 `AgentHub_0.4.0_aarch64.dmg`（3.97 MiB，17:36–17:37），`/Applications/AgentHub.app` 已覆盖安装 0.4.0；首次 DMG 尝试因沙箱 hdiutil 权限失败，完整权限重跑成功；未签名/未公证。页面视觉以最终组件为准；token、状态映射、命令签名与文案 key 不应另造一套。
 
 ---
 
 ## 11. 状态标记（已验证 / 未验证 / 已知限制）
 
-- **已验证**：设计 token、i18n、状态映射、API 封装、router/App/12 视图/20 组件、`pnpm build`、**29 个前端测试**；隔离 home GUI 运行验收（Dashboard/健康摘要/onboarding/中文界面/活动历史）。
+- **已验证**：设计 token、i18n、状态映射、API 封装、router/App/12 视图/21 组件、`pnpm build`、**38 个前端测试**；隔离 home GUI 运行验收（Dashboard/健康摘要/onboarding/中文界面/活动历史）；Skills 扫描发现/批量导入 UI 由前端测试覆盖。
 - **未验证**：Tauri 自动化回归、原生文件选择器、真实 Keychain、原生 opener、完整分发→回滚的 GUI 点击流、Health 页的自动化交互。
 - **已知限制**：未做 Playwright/XCUITest；静态审计是启发式、人工证据是用户输入（UI 已提示）；MCP headers 明文提示已在 UI 展示但仍需安全侧修复；详情页未知字段只做结构展示。
 

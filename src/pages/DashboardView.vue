@@ -11,6 +11,7 @@ import PageHeader from '../components/PageHeader.vue'
 import StatCard from '../components/StatCard.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import { api, normalizeError } from '../lib/api'
+import { countDefaultImportableGroups, groupDiscoveredSkills } from '../lib/discovered'
 import { formatDateTime, formatRelativeTime } from '../lib/format'
 import {
   agentStatusKey,
@@ -34,6 +35,9 @@ const dashboard = computed(() => app.dashboard)
 const loading = computed(() => app.dashboardLoading && !app.dashboard)
 const error = computed(() => app.dashboardError)
 const scanReport = computed(() => app.scanReport)
+const importableDiscovered = computed(() =>
+  countDefaultImportableGroups(groupDiscoveredSkills(app.scanReport)),
+)
 const changes = ref<ChangeCheck | null>(null)
 const checkingChanges = ref(false)
 const stats = computed(() => dashboard.value?.stats ?? null)
@@ -245,6 +249,15 @@ function openOperation(id: string): void {
             :hint="t('dashboard.statWarningsHint')"
             icon="activity"
             :tone="(stats?.warnings ?? 0) > 0 ? 'danger' : 'neutral'"
+          />
+          <StatCard
+            v-if="importableDiscovered > 0"
+            :label="t('dashboard.discoveredCard')"
+            :value="importableDiscovered"
+            :hint="t('dashboard.discoveredHint', { count: importableDiscovered })"
+            icon="scan"
+            tone="info"
+            to="/skills?tab=discovered"
           />
         </div>
 

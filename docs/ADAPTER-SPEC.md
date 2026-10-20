@@ -81,7 +81,7 @@ resolved_mcp_targets(home):
 | 结构 | 关键字段 | 校验 |
 |---|---|---|
 | `Detection` | `status`、`app_path`、`home_path`、`evidence`、`notes` | `evidence` 必须是真实存在的路径字符串；`NotInstalled` 用 `Detection::not_installed` |
-| `SkillRootSpec` | `path`、`scope`、`source` | `source` 目前只会是 `adapter`/`custom`/`project`；**没有 adapter 产出 `builtin`**，所以 `scan.rs:106-108` 的只读提示永远不会触发（已知缺陷） |
+| `SkillRootSpec` | `path`、`scope`、`source` | `source` 现在由 `classify_root_source` 分类：`adapter`/`builtin`/`marketplace`/`workspace`/`connector`/`shared`；custom root 为 `custom`，项目根为 `project`（见 §3.3） |
 | `McpTargetSpec` | `path`、`format`、`scope`、`transports`、`notes` | `to_model()` 用文件父目录判断 `writable`（`adapters/mod.rs:77-92`）；父目录不存在时 `writable=false` |
 | `SkillRoot` | 由 `SkillRootSpec::to_model(skill_count)` 生成 | `exists`/`writable` 是实时探测，不是缓存 |
 
@@ -162,6 +162,26 @@ resolved_mcp_targets(home):
 | Doubao Work | `<project>/.user_skills`、`<project>/.doubao/skills`（扫描；需注册 custom root 才可安装） | 无 |
 
 > Codex 未声明 `<project>/.codex/skills` 与项目 MCP，原因是本机证据只到「全局根 VERIFIED、项目根 VR」（AGENT-COMPATIBILITY §2.1）。这是「证据不足就不声明」的示例。
+
+### 3.3 rootSource 分类与只读来源（0.4.0）
+
+扫描发现的每条 `DiscoveredSkill.rootSource` 由 `adapters::classify_root_source(path)` + root spec 决定：
+
+| rootSource | 判定（路径/来源） | 批量采纳默认 | 例子 |
+|---|---|---|---|
+| `adapter` | 常规可写 adapter root（默认） | ✅ 导入 | `~/.codex/skills`、`~/.qwenworkcn/skills` |
+| `custom` | 用户在 Agents 页注册的 custom skill root | ✅ 导入 | 用户添加的项目目录 |
+| `project` | `project_skill_roots` 追加的根 | ✅ 导入 | `<project>/.dsh/skills` |
+| `builtin` | 路径含 `builtin_skills` | ⛔ 默认跳过 | `~/.trae-cn/builtin_skills` |
+| `marketplace` | 路径含 `skills-marketplace`/`marketplace` | ⛔ 默认跳过 | `~/.workbuddy/skills-marketplace/skills` |
+| `workspace` | 路径含 `/work/` | ⛔ 默认跳过 | `~/.trae-cn/work/<workspace>/<skill>` |
+| `connector` | 路径含 `connectors/skills` | ⛔ 默认跳过 | `~/.workbuddy/connectors/skills` |
+| `shared` | 以 `.agents/skills` 结尾 | ✅ 导入 | `~/.agents/skills`（跨 Agent 共享） |
+| `unknown` | 旧扫描 payload 无字段/空值 | ✅ 导入（UI 显示 unknown） | 旧版本扫描结果 |
+
+**策略**：默认只导 `adapter/custom/project/shared/unknown`；`builtin/marketplace/workspace/connector` 是 Agent 自带/缓存，需用户显式 `include_read_only_sources`。导入只复制到中央库，不修改 Agent 目录。`scan_results` 的旧 payload 缺少字段时按 `unknown` 处理（`#[serde(default)]`）。
+
+**各 Adapter 的 root source 事实**：Codex/DSH/Trae/Trae CN/ZCode/WorkBuddy/Claude 的常规 skills 根 → `adapter`；`.agents/skills` → `shared`；WorkBuddy `skills-marketplace` → `marketplace`；Trae CN `builtin_skills` → `builtin`；Trae CN `work/*` → `workspace`；WorkBuddy `connectors/skills` → `connector`；Qwen `~/.qwenworkcn/skills` → `adapter`；Doubao 无全局根（项目 `.user_skills`/`.doubao/skills` → `project`，注册为 custom 后 → `custom`）。
 
 ---
 

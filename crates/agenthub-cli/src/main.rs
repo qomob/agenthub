@@ -124,6 +124,8 @@ enum SkillsCommand {
     Impact(ImpactArgs),
     /// Record real (manual) validation evidence for a skill version.
     Validate(ValidateArgs),
+    /// Adopt skills found by the last scan into the central library.
+    Adopt(AdoptArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -300,6 +302,25 @@ struct ValidateArgs {
 }
 
 #[derive(Debug, Args)]
+struct AdoptArgs {
+    /// Restrict to these agent keys (comma separated); default = all scanned agents.
+    #[arg(long, value_name = "KEY,...", value_delimiter = ',')]
+    agents: Vec<String>,
+    /// Also adopt skills from read-only roots (built-in/marketplace/workspace caches).
+    #[arg(long = "include-read-only")]
+    include_read_only: bool,
+    /// Maximum number of skills to adopt in this run.
+    #[arg(long, default_value_t = 200)]
+    max: usize,
+    /// Only print what would be adopted.
+    #[arg(long = "dry-run")]
+    dry_run: bool,
+    /// Confirm and write the central library.
+    #[arg(long)]
+    yes: bool,
+}
+
+#[derive(Debug, Args)]
 struct HealthArgs {
     /// Show agent versions and health instead of the capability overview.
     #[arg(long)]
@@ -423,6 +444,7 @@ fn run(cli: Cli) -> CliResult<u8> {
             SkillsCommand::Deps(args) => cmd_skills_deps(&ctx, args),
             SkillsCommand::Impact(args) => cmd_skills_impact(&ctx, args),
             SkillsCommand::Validate(args) => cmd_skills_validate(&ctx, args),
+            SkillsCommand::Adopt(args) => cmd_skills_adopt(&ctx, args),
         },
         Commands::Mcp { command } => match command {
             McpCommand::List => cmd_mcp_list(&ctx),
@@ -1217,6 +1239,63 @@ fn cmd_skills_impact(ctx: &Ctx, args: ImpactArgs) -> CliResult<u8> {
         }
     }
     Ok(EXIT_OK)
+}
+
+fn cmd_skills_adopt(ctx: &Ctx, args: AdoptArgs) -> CliResult<u8> {
+    let agent_ids = if args.agents.is_empty() {
+        None
+    } else {
+        Some(resolve_agent_ids(&ctx.hub, &args.agents)?)
+    };
+    let preview = args.dry_run || !args.yes;
+    let result = ctx.hub.import_scan_skills(ScanImportRequest {
+        agent_ids,
+        paths: None,
+        include_read_only_sources: args.include_read_only,
+        max_items: Some(args.max),
+        dry_run: preview,
+    })?;
+    if ctx.json {
+        ctx.emit_value(json!({
+            "applied": !preview,
+            "result": serde_json::to_value(&result)?,
+        }));
+    } else {
+        println!(
+            "{} {} candidate(s): adopt {}, already in library {}, duplicates {}, read-only skipped {}, limit skipped {}, failed {}",
+            if preview { "Would adopt from" } else { "Adopted from" },
+            result.total_candidates,
+            result.imported_count,
+            result.skipped_existing,
+            result.skipped_duplicate,
+            result.skipped_read_only,
+            result.skipped_limit,
+            result.failed.len()
+        );
+        for item in result.imported.iter().take(50) {
+            println!(
+                "  {:<28} {:<14} from {:<12} {}",
+                item.slug,
+                item.version_label,
+                item.agent_key.clone().unwrap_or_else(|| "-".to_string()),
+                item.path
+            );
+        }
+        if result.imported.len() > 50 {
+            println!("  ... and {} more", result.imported.len() - 50);
+        }
+        for failure in result.failed.iter().take(20) {
+            println!("  FAILED {}: {}", failure.path, failure.error);
+        }
+        if preview {
+            println!("Dry run: nothing was written. Re-run with --yes to adopt these skills.");
+        }
+    }
+    Ok(if result.failed.is_empty() {
+        if preview { EXIT_PARTIAL } else { EXIT_OK }
+    } else {
+        EXIT_PARTIAL
+    })
 }
 
 fn cmd_skills_validate(ctx: &Ctx, args: ValidateArgs) -> CliResult<u8> {

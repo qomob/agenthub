@@ -1,6 +1,6 @@
 # AgentHub 验证平台（Validation Platform）
 
-> 版本：0.3.0 开发线
+> 版本：0.4.0（`.app`/`.dmg` 已构建并覆盖安装 `/Applications`）
 > 状态基准：2026-10-20 16:24（Asia/Shanghai），以 `crates/agenthub-core/src/{audit,deps,impact,validation,agent_health}.rs` 与当前测试为准。
 > 一句话：AgentHub 不只回答「装没装」，还回答「能不能用、安不安全、更新后会不会坏、凭什么说它验证过」。
 
@@ -17,7 +17,7 @@
 3. **安全优先**：`audit=fail` 或 `deps=needs_attention` 时，即使人工记录 passed，健康状态仍是 `needs_attention`；只有当前版本、**所有已安装 Agent** 都有 manual passed 证据，才是 `verified`。
 4. **UI/CLI 均已落地**：`/health` 页、SkillDetail 四区块、Agents 版本健康、Dashboard/Skills 健康摘要、分发预览影响摘要；CLI `health` 与 `skills audit|deps|impact|validate`。
 5. **真实 Mac 验证**：真实 `~/.agenthub` 自动迁移到 DB v2；`health` total=2/not_deployed=2；真实审计 memory-maker = warn/medium、8 findings；deps = healthy（node ok、MCP unknown）；impact = medium/skill_md_changed/requiresRevalidation=true；manual passed 证据写入成功。证据 `/tmp/agenthub-validator-real/`。
-6. **测试基线**：core **80 passed**（44 unit + 36 integration，validator 11 + adapters_extended 4）、CLI **16 passed**、前端 **7 files / 29 tests**；Rust 合计 **96**。最新结果见 §11。
+6. **测试基线**：core **82 passed**（44 unit + 38 integration，validator 11 + adapters_extended 4 + scan_adopt 2）、CLI **16 passed**、前端 **8 files / 38 tests**；Rust 合计 **98**。最新结果见 §11。
 
 ---
 
@@ -378,10 +378,10 @@ UI：SkillDetail →「验证证据」区块；会显示「封闭 Agent 无法�
 
 | 范围 | 结果 |
 |---|---|
-| `./scripts/cargo.sh test -p agenthub-core` | **80 passed / 0 failed**（44 unit + 36 integration；validator 11 + adapters_extended 4） |
+| `./scripts/cargo.sh test -p agenthub-core` | **82 passed / 0 failed**（44 unit + 38 integration；validator 11 + adapters_extended 4 + scan_adopt 2） |
 | `./scripts/cargo.sh test -p agenthub-cli` | **16 passed / 0 failed**（9 旧 + 7 validator CLI） |
-| Rust 合计 | **96 passed / 0 failed** |
-| `pnpm test` | **7 files / 29 tests passed** |
+| Rust 合计 | **98 passed / 0 failed** |
+| `pnpm test` | **8 files / 38 tests passed** |
 | `pnpm build` | 通过 |
 | `./scripts/cargo.sh check -p agenthub` | exit 0 |
 

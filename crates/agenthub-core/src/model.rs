@@ -421,6 +421,10 @@ pub struct DiscoveredSkill {
     pub version: Option<String>,
     pub path: String,
     pub root: String,
+    /// Source classification of the root (adapter/project/custom/builtin/
+    /// marketplace/workspace/connector/shared); empty for older scan payloads.
+    #[serde(default)]
+    pub root_source: String,
     pub scope: Scope,
     pub agent_key: Option<String>,
     pub content_hash: String,
@@ -1313,4 +1317,58 @@ pub struct ImpactRequest {
     pub capability_id: String,
     pub from_version_id: Option<String>,
     pub to_version_id: String,
+}
+
+
+// ---------------------------------------------------------------------------
+// Bulk import of previously discovered skills
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanImportRequest {
+    /// Restrict to these agent ids; empty/None means every scanned agent.
+    pub agent_ids: Option<Vec<String>>,
+    /// Import only the discovered paths the user selected. None means all.
+    pub paths: Option<Vec<String>>,
+    /// Also adopt skills from read-only roots (built-in / marketplace /
+    /// workspace / connector caches). Off by default.
+    pub include_read_only_sources: bool,
+    pub max_items: Option<usize>,
+    /// Preview only: compute what would be imported without writing the library.
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanImportedItem {
+    pub slug: String,
+    pub name: String,
+    pub version_label: String,
+    pub agent_key: Option<String>,
+    pub path: String,
+    pub size_bytes: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanImportFailure {
+    pub path: String,
+    pub name: String,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanImportResult {
+    pub imported: Vec<ScanImportedItem>,
+    pub imported_count: usize,
+    pub skipped_existing: usize,
+    pub skipped_duplicate: usize,
+    pub skipped_read_only: usize,
+    pub skipped_limit: usize,
+    pub failed: Vec<ScanImportFailure>,
+    pub total_candidates: usize,
+    pub finished_at: String,
 }

@@ -12,6 +12,7 @@ import PageHeader from '../components/PageHeader.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import { api, normalizeError } from '../lib/api'
 import { chooseDirectory } from '../lib/dialogs'
+import { isReadOnlyRootSource } from '../lib/discovered'
 import { formatDateTime, formatRelativeTime } from '../lib/format'
 import {
   agentStatusKey,
@@ -243,24 +244,16 @@ function rootSummary(agent: AgentView): string {
   const existing = agent.skillRoots.filter((root) => root.exists).length
   return `${existing}/${agent.skillRoots.length}`
 }
-
-const READ_ONLY_ROOT_SOURCES = new Set([
-  'marketplace',
-  'builtin',
-  'workspace',
-  'connector',
-  'shared',
-])
-
-function isReadOnlyRoot(source: string): boolean {
-  return READ_ONLY_ROOT_SOURCES.has(source)
-}
 </script>
 
 <template>
   <div class="page">
     <PageHeader :title="t('agents.title')" :subtitle="t('agents.subtitle')">
       <template #actions>
+        <RouterLink :to="{ name: 'skills', query: { tab: 'discovered' } }" class="btn btn-ghost">
+          <Icon name="scan" :size="13" />
+          {{ t('agents.viewDiscovered') }}
+        </RouterLink>
         <button type="button" class="btn" :disabled="healthLoading" @click="loadAgentHealth(true)">
           <span v-if="healthLoading" class="spinner spinner-sm" aria-hidden="true" />
           <Icon v-else name="shield" :size="13" />
@@ -649,7 +642,7 @@ function isReadOnlyRoot(source: string): boolean {
                     <div class="row row-wrap" style="gap: 3px">
                       <span class="chip">{{ root.source }}</span>
                       <StatusBadge
-                        v-if="isReadOnlyRoot(root.source)"
+                        v-if="isReadOnlyRootSource(root.source)"
                         :label="t('agents.readOnlySource')"
                         tone="neutral"
                         :dot="false"

@@ -1,6 +1,6 @@
 # AgentHub 测试计划
 
-> 状态基准：2026-10-20 16:44（Asia/Shanghai）。所有结果均为本机真实执行输出摘要，**未通过的测试不写成通过**。真实 Mac 验收见 [ACCEPTANCE-REPORT.md](ACCEPTANCE-REPORT.md)。
+> 状态基准：2026-10-20 17:32（Asia/Shanghai）。所有结果均为本机真实执行输出摘要，**未通过的测试不写成通过**。真实 Mac 验收见 [ACCEPTANCE-REPORT.md](ACCEPTANCE-REPORT.md)。
 > 测试隔离原则：**绝不触碰真实 Agent 目录**；所有测试使用临时 home（`tempfile` + `CoreConfig::for_home` / CLI `--home`），唯一例外是只读探测 `/Applications`。
 
 ---
@@ -10,21 +10,21 @@
 | 层 | 命令 | 结果 | 说明 |
 |---|---|---|---|
 | core 单元测试 | `./scripts/cargo.sh test -p agenthub-core`（lib） | **44 passed / 0 failed** | audit/deps/impact/validation/agent_health + 既有模块单测 |
-| core 集成测试 | 同上（tests/*） | **36 passed / 0 failed** | 9 个测试二进制；新增 adapters_extended 4；validator 11 |
-| core 合计 | 同上 | **80 passed / 0 failed** | 44 unit + 36 integration |
+| core 集成测试 | 同上（tests/*） | **38 passed / 0 failed** | 10 个测试二进制；新增 scan_adopt 2；validator 11 |
+| core 合计 | 同上 | **82 passed / 0 failed** | 44 unit + 38 integration |
 | core 文档测试 | 同上（doc-tests） | `0 tests` | — |
 | CLI 集成测试 | `./scripts/cargo.sh test -p agenthub-cli` | **16 passed / 0 failed** | 9 旧 + 7 validator CLI（`validator_cli.rs`） |
-| Rust 合计 | 两条命令 | **96 passed / 0 failed** | 2026-10-20 16:44 重跑 |
+| Rust 合计 | 两条命令 | **98 passed / 0 failed** | 2026-10-20 17:32 重跑 |
 | Tauri 编译 | `./scripts/cargo.sh check -p agenthub` | **exit 0** | 47 个命令 |
 | 前端构建 | `pnpm build` | **通过** | `vue-tsc --noEmit` + Vite build |
-| 前端测试 | `pnpm test`（vitest） | **7 files / 29 tests passed** | 新增 health/health-ui；含 app-smoke |
+| 前端测试 | `pnpm test`（vitest） | **8 files / 38 tests passed** | 新增 health/health-ui/discovered |
 | Tauri 自动化测试 | 未执行 | 未验证 | 无 `src-tauri` 测试；GUI 为人工验收 |
 | GUI 运行验收 | 隔离 home | ✅ 通过 | Dashboard/health/onboarding 截图见 `docs/evidence/` |
 | 真实 Mac（第一轮） | `scripts/real-acceptance.sh` | ✅ 通过 | 安装/分发/更新/回滚/卸载；证据 `/tmp/agenthub-real-acceptance/` |
 | 真实 Mac（validator） | 人工 CLI 序列 | ✅ 通过 | DB v1→v2、Agent 版本、audit/deps/impact/validate；证据 `/tmp/agenthub-validator-real/` |
-| DMG | `pnpm tauri build` | ✅ 已产出 0.3.0 | `AgentHub_0.3.0_aarch64.dmg`（3.96 MiB，16:48）；`/Applications` 已安装 0.3.0 |
+| DMG | `pnpm tauri build` | ✅ 已产出 0.4.0 | `AgentHub_0.4.0_aarch64.dmg`（3.97 MiB，17:37）；`/Applications` 已安装 0.4.0 |
 
-> 与第一轮（core 21/CLI 9/前端 21）相比，本轮新增 core 44 个 unit + validator 11 个 integration、adapters_extended 4 个、CLI validator 7 个、前端 8 个测试。本文以 16:44 的结果为准。
+> 与第一轮（core 21/CLI 9/前端 21）相比，本轮新增 core 44 个 unit + validator 11 个 integration、adapters_extended 4 个、scan_adopt 2 个、CLI validator 7 个、前端 17 个测试。本文以 17:32 的结果为准。
 
 ### 0.1 测试文件清单
 
@@ -40,12 +40,13 @@
 | `crates/agenthub-core/tests/git_import.rs` | 1 | 本地 git 导入 |
 | `crates/agenthub-core/tests/validator.rs` | **11** | 静态审计、依赖、影响、健康、Agent 版本、DB v2、same-second 排序、密钥脱敏 |
 | `crates/agenthub-core/tests/adapters_extended.rs` | **4** | 注册表含 11；Qwen 检测/扫描/插件；Qwen MCP 写入/移除保真；Doubao workspace 扫描/无根 blocked/注册 custom root 后部署 |
+| `crates/agenthub-core/tests/scan_adopt.rs` | **2** | 跨 Agent 去重 + 只读跳过 + dryRun 不写 + 幂等 + include-read-only；按 agent 过滤 |
 | `crates/agenthub-cli/tests/cli.rs` | 9 | 扫描/导入/install 门禁/rollback/sync/mcp/backup |
 | `crates/agenthub-cli/tests/validator_cli.rs` | **7** | `health`、`skills audit|deps|impact|validate`、退出码、JSON |
 | `src/lib/__tests__/{status,markdown,format,i18n,health}.spec.ts` | 28（合计） | 状态映射、Markdown、格式化、i18n、health 映射/筛选 |
 | `src/__tests__/{app-smoke,health-ui}.spec.ts` | 8（合计） | 应用冒烟、Health 页/组件 |
 
-> 前端合计 7 文件 / 29 测试；上表拆分仅说明覆盖来源。
+> 前端合计 8 文件 / 38 测试；上表拆分仅说明覆盖来源。
 
 ### 0.2 回归记录（已修复）
 
@@ -102,14 +103,32 @@
 
 ---
 
+### 0.6 真实 Mac 批量采纳验收（2026-10-20 17:32）
+
+用户反馈「技能库始终只有两个，实际本机不同 Agent 安装的技能很多」；修复后真实机器执行 `skills adopt`，证据 `/tmp/agenthub-adopt-real/`（scan2/preview2/adopt JSON，err 为空）。
+
+| 指标 | 值 |
+|---|---|
+| 重新扫描候选 | **396**（invalid 5、conflicts 7、duplicates 3） |
+| `skills adopt --dry-run` | 导入预览 **112**；skippedReadOnly **273**、skippedDuplicate **11**、skippedExisting 0、failed 0 |
+| `skills adopt --yes` | 实导 **112** 个（约 **55 MB**，`57,583,223` bytes），失败 **0** |
+| 中央库 capability | **2 → 111**（112 条导入按版本共存形成 111 个 capability；versions 116、agent_dir sources 112） |
+| 去重 | 同一 `(slug, contentHash)` 跨 Agent 只导一次；重复运行幂等 |
+| 只读来源 | 默认跳过 builtin/marketplace/workspace/connector（本机 273 条） |
+| 审计 | 写 `skills.adopt_scan` JSONL（不含文件内容） |
+
+> 这次修复把「扫描发现」做成 Skills 页一等公民；真实数字证明中央库不再只有手动导入的 2 条。
+
+---
+
 ---
 
 ## 1. 测试分层
 
 | 层 | 范围 | 工具/位置 | 现状 |
 |---|---|---|---|
-| L1 单元 | audit/deps/impact/validation/agent_health、`util`、`skill`、`mcp` codec、前端 status/health/markdown/format/i18n | Rust `#[cfg(test)]` / vitest | ✅ core 44、前端 29 |
-| L2 集成 | `AgentHub` 全链路 + validator/DB v2/健康证据 + 扩展 adapter | `crates/agenthub-core/tests/` | ✅ 36 个全部通过（validator 11；adapters_extended 4） |
+| L1 单元 | audit/deps/impact/validation/agent_health、`util`、`skill`、`mcp` codec、前端 status/health/markdown/format/i18n | Rust `#[cfg(test)]` / vitest | ✅ core 44、前端 38 |
+| L2 集成 | `AgentHub` 全链路 + validator/DB v2/健康证据 + 扩展 adapter + 扫描采纳 | `crates/agenthub-core/tests/` | ✅ 38 个全部通过（validator 11；adapters_extended 4；scan_adopt 2） |
 | L3 CLI | 真实进程 + 隔离 home：旧命令 + `health`/`audit|deps|impact|validate` 退出码/JSON | `crates/agenthub-cli/tests/{cli,validator_cli}.rs` | ✅ 16 个全部通过（7 新） |
 | L4 手动验收 | 首次启动、真实 Agent 发现、GUI 交互、真实 Mac 写入、Keychain、权限/重启 | 本文 §5、[ACCEPTANCE-REPORT.md](ACCEPTANCE-REPORT.md) | ✅ 真实 Mac + GUI（隔离 home）人工验收通过；Keychain 正向/自动注入未覆盖 |
 
@@ -235,6 +254,18 @@
 | V12 | DB v1→v2 | user_version=2、五表存在、旧数据保留 | ✅ validator 集成 |
 | V13 | Agent 版本 baseline/变化/同秒排序 | 首次 false；变化 true；同秒 rowid 取最新 | ✅ agent_health 单测 + validator |
 | V14 | 审计/操作/日志不含密钥原值 | 全链路断言 | ✅ validator `...never_store_raw_secrets` |
+
+### 3.5b 扫描发现与批量采纳（0.4.0）
+
+| ID | 场景 | 期望 | 覆盖 |
+|---|---|---|---|
+| D17 | 扫描发现分组 | 按 (slug, contentHash) 跨 Agent 合并；已在库/未入库/只读标记正确 | ✅ 前端 discovered.spec；真实 scan |
+| D18 | 批量采纳默认跳过只读 | builtin/marketplace/workspace/connector 不计入 | ✅ scan_adopt |
+| D19 | 去重与幂等 | 同内容多 Agent 一次；重复运行 skipped_existing/duplicate | ✅ scan_adopt |
+| D20 | dry-run | 不写中央库，只返回 planned | ✅ scan_adopt + CLI |
+| D21 | 按 Agent 过滤 | 只采纳指定 agent | ✅ scan_adopt |
+| D22 | include-read-only | 显式勾选后才导入只读来源 | ✅ scan_adopt |
+| D23 | 真实 396→112/111 | 失败 0、55MB、库能力 2→111 | ✅ `/tmp/agenthub-adopt-real/` |
 
 ### 3.6 可靠性
 
@@ -399,8 +430,8 @@ bash scripts/real-acceptance.sh
 
 ## 6.5 状态标记（已验证 / 未验证 / 已知限制）
 
-- **已验证**：core **80**（44 unit + 36 integration）、CLI **16**、前端 **29**（Rust 合计 96）全部通过；`pnpm build`、完整 `pnpm tauri build`（.app + .dmg）通过；第一轮真实 Mac 安装/分发/更新/回滚；第二轮真实 Mac validator（DB v1→v2、Agent 版本、audit/deps/impact/validate）；GUI（隔离 home，含健康摘要）人工验收通过。
-- **未验证**：Qwen symlink/热加载/MCP 真实生效方式；Doubao 全部（本机未安装）；签名/公证（0.3.0 DMG 已产出）、GUI 自动化、真实 Keychain 正向、真实 MCP 配置写入、并发/中断/磁盘满、备份恢复、非 macOS。
+- **已验证**：core **82**（44 unit + 38 integration）、CLI **16**、前端 **38**（Rust 合计 98）全部通过；`pnpm build`、完整 `pnpm tauri build`（.app + .dmg）通过；第一轮真实 Mac 安装/分发/更新/回滚；第二轮真实 Mac validator（DB v1→v2、Agent 版本、audit/deps/impact/validate）；GUI（隔离 home，含健康摘要）人工验收通过。
+- **未验证**：Qwen symlink/热加载/MCP 真实生效方式；Doubao 全部（本机未安装）；签名/公证（0.4.0 DMG 已产出）、GUI 自动化、真实 Keychain 正向、真实 MCP 配置写入、并发/中断/磁盘满、备份恢复、非 macOS。
 - **已知限制**：静态审计是启发式；人工证据是用户输入；MCP/凭据静态 unknown；前端无 Tauri 运行时测试；部分场景仅手工（见 §6）；测试受 `/Applications` 真实 app 影响。
 
 ## 7. 交叉链接

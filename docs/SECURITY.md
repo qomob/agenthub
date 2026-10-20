@@ -197,7 +197,7 @@ MCP env 值：
 | R14 | 依赖供应链 | rusqlite/toml_edit/serde 等为常规依赖；无 `cargo audit` 记录（本次未执行） |
 | R16 | 验证证据不可防伪 | `notes/evidence` 为用户输入；只能作为人工证据，不能作为安全认证；后续可加 hash/附件 |
 | R17 | Agent 版本探测依赖 bundle/CLI | 非标准打包/输出格式可能导致未知；不猜测，不自动阻断 |
-| R15 | 签名/公证 | 0.3.0 `.app`/`.dmg` 已产出并安装；未签名/未公证；分发给他人前需完成 Developer ID + notarization |
+| R15 | 签名/公证 | 0.4.0 `.app`/`.dmg` 已产出并安装；未签名/未公证；分发给他人前需完成 Developer ID + notarization |
 
 ### 6.3 用户确认点（产品必须保留）
 
@@ -231,7 +231,7 @@ MCP env 值：
 
 ## 6.5 状态标记（已验证 / 未验证 / 已知限制）
 
-- **已验证**：zip 边界、symlink 逃逸拒绝、原子写、快照/回滚、外部修改检测、Keychain 存储与缺失 blocked、损坏配置拒绝覆盖、MCP env 计划脱敏、JSONL 审计；**静态审计不执行脚本/不联网/凭据脱敏**；**人工证据语义与健康状态机**（安全优先、旧版本失效）；core 80/CLI 16/前端 29（Rust 96）测试、真实 Mac validator/adapter 验收。
+- **已验证**：zip 边界、symlink 逃逸拒绝、原子写、快照/回滚、外部修改检测、Keychain 存储与缺失 blocked、损坏配置拒绝覆盖、MCP env 计划脱敏、JSONL 审计；**静态审计不执行脚本/不联网/凭据脱敏**；**人工证据语义与健康状态机**（安全优先、旧版本失效）；core 82/CLI 16/前端 38（Rust 98）测试、真实 Mac validator/adapter/adopt 验收。
 - **未验证**：真实 Keychain 正向写入、真实 MCP 配置写入、GUI 自动化注入测试、并发/中断/磁盘满、非 macOS、签名/公证（DMG 已产出）；静态审计未做 fuzz/对抗样本全量评估。
 - **已知限制**：headers 明文、secret argv、快照/备份含凭据、应用未沙箱/未签名、备份恢复未实现、签名/公证未验证；静态审计是启发式、人工证据为用户输入；见 §6/§7。
 
@@ -247,7 +247,7 @@ MCP env 值：
 - [ ] Keychain 拒绝授权 → 错误可读、不泄露值、不写坏配置。
 - [x] UI：隔离 home 下 onboarding/Dashboard 正常（截图见 [ACCEPTANCE-REPORT.md](ACCEPTANCE-REPORT.md)）；XSS 自动化测试仍未覆盖。
 - [x] 真实 Mac：导入 → 分发 → 扫描 inSync → 更新 → 回滚 → 卸载 → 备份/doctor 全流程通过（副本见 `scripts/real-acceptance.sh`）。
-- [x] 0.3.0 DMG 已产出（`AgentHub_0.3.0_aarch64.dmg`，3.96 MiB）并覆盖安装 `/Applications`；[ ] 签名/公证待完成。
+- [x] 0.4.0 DMG 已产出（`AgentHub_0.4.0_aarch64.dmg`，3.97 MiB）并覆盖安装 `/Applications`；[ ] 签名/公证待完成。
 - [x] 静态审计：含 `curl|sh`/`sudo`/`rm -rf /`/`eval`/硬编码密钥的 fixture → fail，且操作/日志/数据库不出现密钥原值（回归测试）。
 - [x] 健康状态机：安装未验证 → unverified；audit fail + manual passed → needs_attention；当前版本全部 Agent manual passed → verified；旧版本失败不影响当前版本（11 个单测）。
 - [x] DB v2：真实 `~/.agenthub` v1→v2 迁移成功，五张新表存在（真实 Mac 验证）。

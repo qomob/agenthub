@@ -10,9 +10,11 @@ import ErrorBanner from '../components/ErrorBanner.vue'
 import Icon from '../components/Icon.vue'
 import LoadingState from '../components/LoadingState.vue'
 import PageHeader from '../components/PageHeader.vue'
+import ScanDiscoveryPanel from '../components/ScanDiscoveryPanel.vue'
 import SkillImportDialog from '../components/SkillImportDialog.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import { api, normalizeError } from '../lib/api'
+import { countValidGroups, groupDiscoveredSkills } from '../lib/discovered'
 import { formatBytes, formatDateTime, formatRelativeTime } from '../lib/format'
 import type { CapabilityHealth, HealthOverview, Skill } from '../lib/types'
 import { useAppStore } from '../stores/app'
@@ -21,6 +23,7 @@ import { useUiStore } from '../stores/ui'
 
 type StatusFilter = 'all' | 'installed' | 'not_installed' | 'updates' | 'drift' | 'conflict'
 type SortKey = 'name' | 'updated' | 'size' | 'installations'
+type SkillsTab = 'library' | 'discovered'
 
 const { t, locale } = useI18n()
 const route = useRoute()
@@ -29,6 +32,7 @@ const store = useSkillsStore()
 const app = useAppStore()
 const ui = useUiStore()
 
+const tab = ref<SkillsTab>('library')
 const search = ref('')
 const statusFilter = ref<StatusFilter>('all')
 const sortKey = ref<SortKey>('name')
@@ -70,6 +74,10 @@ const columns = computed(() => [
 
 const agentFilterName = computed(
   () => app.agents.find((agent) => agent.key === agentFilter.value)?.name ?? agentFilter.value,
+)
+
+const discoveredValidCount = computed(() =>
+  countValidGroups(groupDiscoveredSkills(app.scanReport)),
 )
 
 const filteredSkills = computed<Skill[]>(() => {
@@ -156,6 +164,7 @@ watch(
 )
 
 function applyRouteQuery(): void {
+  tab.value = route.query.tab === 'discovered' ? 'discovered' : 'library'
   const agent = route.query.agent
   agentFilter.value = typeof agent === 'string' && agent.length > 0 ? agent : null
   const filter = route.query.filter
@@ -165,6 +174,14 @@ function applyRouteQuery(): void {
   ) {
     statusFilter.value = filter as StatusFilter
   }
+}
+
+function switchTab(next: SkillsTab): void {
+  tab.value = next
+  const query = { ...route.query }
+  if (next === 'discovered') query.tab = 'discovered'
+  else delete query.tab
+  void router.replace({ name: 'skills', query })
 }
 
 function skillKey(skill: Skill): string {
@@ -224,13 +241,23 @@ function onImported(skillId: string): void {
   <div class="page">
     <PageHeader :title="t('skills.title')" :subtitle="t('skills.subtitle')">
       <template #meta>
-        <p class="hint" style="margin-top: 6px">
+        <p v-if="tab === 'library'" class="hint" style="margin-top: 6px">
           {{ filteredSkills.length }} / {{ store.skills.length }} {{ t('common.items') }}
           <span v-if="agentFilter"> · {{ t('skills.agentFilter', { agent: agentFilterName }) }}</span>
         </p>
+        <p v-else class="hint" style="margin-top: 6px">
+          {{ discoveredValidCount }} {{ t('common.items') }} ·
+          {{ t('skills.tabs.discovered', { count: discoveredValidCount }) }}
+        </p>
       </template>
       <template #actions>
-        <button type="button" class="btn" :disabled="store.loading" @click="refresh">
+        <button
+          v-if="tab === 'library'"
+          type="button"
+          class="btn"
+          :disabled="store.loading"
+          @click="refresh"
+        >
           <span v-if="store.loading" class="spinner spinner-sm" aria-hidden="true" />
           <Icon v-else name="refresh" :size="13" />
           {{ t('common.refresh') }}
@@ -242,7 +269,32 @@ function onImported(skillId: string): void {
       </template>
     </PageHeader>
 
+    <div class="tabs" role="tablist">
+      <button
+        type="button"
+        class="tab"
+        :class="{ active: tab === 'library' }"
+        role="tab"
+        :aria-selected="tab === 'library'"
+        @click="switchTab('library')"
+      >
+        {{ t('skills.tabs.library', { count: store.skills.length }) }}
+      </button>
+      <button
+        type="button"
+        class="tab"
+        :class="{ active: tab === 'discovered' }"
+        role="tab"
+        :aria-selected="tab === 'discovered'"
+        @click="switchTab('discovered')"
+      >
+        {{ t('skills.tabs.discovered', { count: discoveredValidCount }) }}
+      </button>
+    </div>
+
     <div class="section-stack">
+      <ScanDiscoveryPanel v-if="tab === 'discovered'" />
+      <template v-else>
       <ErrorBanner
         v-if="store.error"
         :message="store.error"
@@ -408,6 +460,7 @@ function onImported(skillId: string): void {
       </div>
 
       <p class="hint">{{ t('skills.scannedImportHint') }}</p>
+      </template>
     </div>
 
     <SkillImportDialog

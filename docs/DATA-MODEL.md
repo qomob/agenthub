@@ -232,7 +232,7 @@
 | `kind` | TEXT | NOT NULL（当前只写 `skill`） |
 | `status` | TEXT | NOT NULL（`ok`/`invalid`） |
 | `fingerprint` | TEXT | 内容 hash |
-| `payload` | TEXT | NOT NULL DEFAULT `'{}'`（`DiscoveredSkill` JSON） |
+| `payload` | TEXT | NOT NULL DEFAULT `'{}'`（`DiscoveredSkill` JSON；含 `rootSource` 分类） |
 | `scanned_at` | TEXT | NOT NULL |
 
 索引 `idx_scan_agent`。每个 Agent 扫描时在事务里 **先删后插**（`db.rs:1356-1378`），因此它是缓存而非历史；写入时把 root 的 `scope` 落库（`scan.rs:137`、`scan.rs:177`）；全局最近扫描时间从该表 `MAX(scanned_at)` 取（`db.rs:1437-1445`）。

@@ -153,6 +153,14 @@ fn skills_import(
 }
 
 #[tauri::command(rename_all = "snake_case")]
+fn skills_import_scan(
+    state: State<'_, AppState>,
+    request: ScanImportRequest,
+) -> Result<ScanImportResult, String> {
+    state.run(|hub| hub.import_scan_skills(request))
+}
+
+#[tauri::command(rename_all = "snake_case")]
 fn skills_plan_install(
     state: State<'_, AppState>,
     request: InstallRequest,
@@ -437,6 +445,7 @@ pub fn run() {
             skills_list,
             skills_get,
             skills_import,
+            skills_import_scan,
             skills_plan_install,
             skills_plan_uninstall,
             skills_audit,

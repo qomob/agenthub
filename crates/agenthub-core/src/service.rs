@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use crate::adapters::{all_adapters, find_adapter, AgentAdapter};
-use crate::db::{Database, InstallationRow, McpRow, ProfileRow};
+use crate::db::{AgentRow, Database, InstallationRow, McpRow, ProfileRow};
 use crate::error::{Error, Result};
 use crate::library::{self, Library};
 use crate::model::*;
@@ -866,6 +866,148 @@ impl AgentHub {
             created,
             warnings,
         })
+    }
+
+    /// Adopt skills found by a previous scan into the central library.
+    ///
+    /// Only valid, deduplicated discovered paths are imported. Read-only roots
+    /// (built-in/marketplace/workspace/connector caches) are skipped unless the
+    /// caller explicitly opts in, because importing hundreds of marketplace
+    /// entries is rarely what the user wants.
+    pub fn import_scan_skills(&self, request: ScanImportRequest) -> Result<ScanImportResult> {
+        self.sync_agents()?;
+        let agents = self.db.list_agents()?;
+        let mut candidates: Vec<(AgentRow, DiscoveredSkill)> = Vec::new();
+        for agent in &agents {
+            if let Some(filter) = &request.agent_ids {
+                if !filter.iter().any(|id| id == &agent.id) {
+                    continue;
+                }
+            }
+            for row in self.db.list_scan_results(&agent.id)? {
+                if row.status != "ok" {
+                    continue;
+                }
+                let Ok(discovered) = serde_json::from_str::<DiscoveredSkill>(&row.payload) else {
+                    continue;
+                };
+                if !discovered.valid {
+                    continue;
+                }
+                if let Some(paths) = &request.paths {
+                    if !paths.iter().any(|path| path == &discovered.path) {
+                        continue;
+                    }
+                }
+                candidates.push((agent.clone(), discovered));
+            }
+        }
+        if candidates.is_empty() {
+            return Err(Error::msg(
+                "no matching scan results; run a scan first and select discovered skills",
+            ));
+        }
+        let total_candidates = candidates.len();
+        let max_items = request.max_items.unwrap_or(500).max(1);
+        let read_only_sources = ["builtin", "marketplace", "workspace", "connector"];
+        let mut seen: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
+        let mut result = ScanImportResult {
+            imported: Vec::new(),
+            imported_count: 0,
+            skipped_existing: 0,
+            skipped_duplicate: 0,
+            skipped_read_only: 0,
+            skipped_limit: 0,
+            failed: Vec::new(),
+            total_candidates,
+            finished_at: util::now(),
+        };
+        for (agent, discovered) in candidates {
+            let dedupe_key = (discovered.slug.clone(), discovered.content_hash.clone());
+            if !seen.insert(dedupe_key) {
+                result.skipped_duplicate += 1;
+                continue;
+            }
+            if !request.include_read_only_sources
+                && read_only_sources.contains(&discovered.root_source.as_str())
+            {
+                result.skipped_read_only += 1;
+                continue;
+            }
+            if let Some(capability) = self.db.find_capability("skill", &discovered.slug)? {
+                if self
+                    .db
+                    .find_version_by_hash(&capability.id, &discovered.content_hash)?
+                    .is_some()
+                {
+                    result.skipped_existing += 1;
+                    continue;
+                }
+            }
+            if result.imported.len() + result.failed.len() >= max_items {
+                result.skipped_limit += 1;
+                continue;
+            }
+            if request.dry_run {
+                result.imported.push(ScanImportedItem {
+                    slug: discovered.slug.clone(),
+                    name: discovered.name.clone(),
+                    version_label: discovered
+                        .version
+                        .clone()
+                        .unwrap_or_else(|| "0.0.0".to_string()),
+                    agent_key: Some(agent.key.clone()),
+                    path: discovered.path.clone(),
+                    size_bytes: discovered.size_bytes,
+                });
+                continue;
+            }
+            match self.import_skill(ImportRequest {
+                source: ImportSource::AgentDir {
+                    agent_id: agent.id.clone(),
+                    path: discovered.path.clone(),
+                },
+                skill_path: None,
+                version_label: discovered.version.clone(),
+                notes: Some(format!(
+                    "Adopted from {} at {}",
+                    agent.key, discovered.path
+                )),
+            }) {
+                Ok(imported) => {
+                    result.imported.push(ScanImportedItem {
+                        slug: imported.skill.slug.clone(),
+                        name: imported.skill.name.clone(),
+                        version_label: imported.version.version_label.clone(),
+                        agent_key: Some(agent.key.clone()),
+                        path: discovered.path.clone(),
+                        size_bytes: imported.version.size_bytes,
+                    });
+                }
+                Err(err) => result.failed.push(ScanImportFailure {
+                    path: discovered.path.clone(),
+                    name: discovered.name.clone(),
+                    error: err.to_string(),
+                }),
+            }
+        }
+        result.imported_count = result.imported.len();
+        result.finished_at = util::now();
+        crate::ops::audit_log(
+            &self.library()?,
+            "skills.adopt_scan",
+            serde_json::json!({
+                "totalCandidates": total_candidates,
+                "imported": result.imported_count,
+                "skippedExisting": result.skipped_existing,
+                "skippedDuplicate": result.skipped_duplicate,
+                "skippedReadOnly": result.skipped_read_only,
+                "failed": result.failed.len(),
+                "includeReadOnly": request.include_read_only_sources,
+            }),
+        );
+        Ok(result)
     }
 
     fn resolve_skill_folder(&self, path: &Path, warnings: &mut Vec<String>) -> Result<PathBuf> {

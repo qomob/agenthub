@@ -1,6 +1,6 @@
 # AgentHub 产品需求文档（PRD）
 
-> 版本：0.3（Capability Control Center）
+> 版本：0.4（Capability Control Center）
 > 日期：2026-10-20
 > 状态基准：以当前代码与实测为准。**「已实现」不等于「已验收」「已验证」**；本文在每个功能后区分「代码已实现 / 未验证 / 未实现」。
 > 关联：[ARCHITECTURE.md](ARCHITECTURE.md)、[ADAPTER-SPEC.md](ADAPTER-SPEC.md)、[TEST-PLAN.md](TEST-PLAN.md)、[AGENT-COMPATIBILITY.md](AGENT-COMPATIBILITY.md)
@@ -46,6 +46,7 @@ MVP **不面向**团队协作、企业管控、非 macOS 平台。
 7. **依赖未就绪**：skill 的脚本依赖 `python3`/`node`/包，本机缺失时只有真正运行时才暴露。
 8. **更新影响未知**：新版本可能新增脚本、网络访问、依赖或权限；更新前无法判断是否需要重新验证。
 9. **「验证过」不可追溯**：口头/记忆中的验证无法绑定到具体版本与 Agent，Agent 升级后也无法感知。
+10. **技能库看不到本机已有技能**：用户机器各 Agent 目录已有大量技能，但 Skills 页只显示「已导入」的少数条目，无法发现/批量纳入中央库。
 
 ---
 
@@ -249,6 +250,25 @@ MVP **不面向**团队协作、企业管控、非 macOS 平台。
 
 **验收**：未部署 → not_deployed；仅有安装 → unverified；audit fail + manual passed → needs_attention；当前版本全部安装 Agent manual passed → verified；旧版本 failed 不影响当前版本。
 
+### K. 扫描发现与批量采纳（0.4.0，用户反馈修复）
+
+**需求**：把「各 Agent 已安装但未入库」的技能做成可发现、可筛选、可批量导入的清单，而不是只显示用户手动导入过的条目。
+
+| 子项 | 状态 | 说明 |
+|---|---|---|
+| Skills 页 Tabs | ✅ | 中央库 (N) / 扫描发现 (M)；深链 `/skills?tab=discovered` |
+| 跨 Agent 分组去重 | ✅ | 按 `(slug, contentHash)` 分组；同一版本在多个 Agent 只显示一行 |
+| 展示字段 | ✅ | 已在库/未入库/只读来源、涉及 Agent、路径、体积、版本、文件数、issues/hash |
+| 搜索/筛选/分页 | ✅ | 名称/slug/Agent/路径搜索；未入库/已在库/只读来源筛选；每页 100 行加载更多；选择与分页独立 |
+| 批量导入 | ✅ | Tauri `skills_import_scan`、CLI `skills adopt`；确认对话框显示数量/体积/Agent/路径，说明不改 Agent 目录 |
+| 只读来源策略 | ✅ | 默认跳过 `builtin/marketplace/workspace/connector`；选只读来源需显式勾选 `include_read_only_sources` |
+| 去重/幂等/失败 | ✅ | 按 `(slug, contentHash)` 去重、跳过已在库、逐条返回失败；重复执行幂等 |
+| Dashboard/Agents/Onboarding 入口 | ✅ | Dashboard 未入库非只读计数；Agents「查看扫描发现」；Onboarding 可导入数量 |
+| 真实结果 | ✅ | 396 候选 → 只读跳过 273、重复 11、导入 112（约 55MB，失败 0）→ 111 capability；证据 `/tmp/agenthub-adopt-real/` |
+| 不做 | ⛔ | 不自动导入；不修改 Agent 目录；不删除来源；不把只读市场缓存默认入库 |
+
+**验收**：重复扫描后「扫描发现」数量与 `scan_results` 一致；选 112 条 → 库能力从 2 → 111；dry-run 不写库；只读来源默认 skipped；重复运行不重复导入。
+
 ## 5. MVP 边界（明确不在范围）
 
 | 不做 | 理由 |
@@ -360,7 +380,7 @@ CLI 验收时加 `--home /tmp/agenthub-accept/home`（等价于 `AGENTHUB_HOME`�
 | 覆盖 | 至少 3 个本机 Agent 可检测、可读、可分发 | 代码支持 **11 个**；本机真实证据：11 个适配器中 Qwen installed、Doubao not_installed，扫描 396 技能（Qwen 31） |
 | 安全 | 不覆盖非托管目标；任何失败可恢复；不读取凭据文件内容 | 代码具备；MCP env 计划已脱敏；真实 Mac 验收未覆盖失败注入 |
 | 可解释 | 每次操作有计划、结果、快照、错误原因 | 具备（缺 import/scan 记录） |
-| 可用 | GUI 完成「扫描 → 导入 → 分发 → 更新 → 回滚」 | **已达成（人工验收）**：真实 Mac CLI 全流程 + 隔离 home GUI；自动化 GUI 回归待补 |
+| 可用 | GUI 完成「扫描 → 发现 → 批量入库 → 分发 → 更新 → 回滚」 | **已达成**：真实 396→112/111 批量采纳 + 第一轮安装/回滚；GUI 人工验收；自动化 GUI 回归待补 |
 | 可验证 | 安装 ≠ 可用；有审计/依赖/人工证据/版本健康 | **已达成**：DB v2 + `/health` 页 + SkillDetail 四区块 + CLI；真实 Mac validator 验收通过 |
 | 可解释 | 每个 finding 有 rule id/severity/category/path/suggestion；每个 health 有 reasons | 已实现（见 VALIDATION.md） |
 | 诚实 | 未实现/未验证能力在 UI 与文档中明确标注；人工证据不冒充自动通过 | 文档与 UI 文案已标注；规则引擎/人工证据限制已公开 |
@@ -373,7 +393,7 @@ CLI 验收时加 `--home /tmp/agenthub-accept/home`（等价于 `AGENTHUB_HOME`�
 |---|---|---|
 | ~~MCP 执行路径缺陷~~ | 已修复：条目级 preflight + 执行接通 | 回归测试已覆盖；继续补 MCP 回滚测试 |
 | 签名/公证未完成 | app 与 DMG 已构建/安装；未签名/未公证 | 配置 Developer ID + notarization |
-| 真实 Agent 目录写入风险 | 误写可能影响用户日常使用 | 默认隔离 home；真实验收使用唯一 slug、目标不存在才执行、失败清理，并已获用户授权 |
+| 真实 Agent 目录写入风险 | 误写可能影响用户日常使用 | 默认隔离 home；真实验收使用唯一 slug/只读 Agent 目录；批量采纳只复制到中央库，不改 Agent 目录 |
 | Adapter 证据漂移 | 私有格式变化导致写入无效 | 文档标注证据日期；codec 独立测试 |
 | Qwen Work 未验证项 | symlink/热加载/MCP 生效方式 | VR；默认 copy；MCP 写入 fixture 验证、真实生效需人工确认 |
 | Doubao Work 本机未安装 | 无法端到端验证 | 标记 NOT_INSTALLED/VR；MCP/插件 manual-only；不猜测全局根 |
@@ -386,6 +406,6 @@ CLI 验收时加 `--home /tmp/agenthub-accept/home`（等价于 `AGENTHUB_HOME`�
 
 ## 9. 已验证 / 未验证 / 已知限制
 
-- **已验证**：真实 Mac 安装/分发/更新/回滚验收；GUI（隔离 home）运行验收；真实 Mac validator 验收；真实 Mac adapter 验收（11 适配器、396 技能、Qwen 31/1.3.1、Doubao not_installed）；core 80 + CLI 16 = 96 个 Rust 测试、前端 29 个测试、`pnpm build`、完整 `pnpm tauri build`。
+- **已验证**：真实 Mac 安装/分发/更新/回滚验收；GUI（隔离 home）运行验收；真实 Mac validator 验收；真实 Mac adapter 验收；真实 Mac 批量采纳（396→112/111，55MB）；core 82 + CLI 16 = 98 个 Rust 测试、前端 38 个测试、`pnpm build`、完整 `pnpm tauri build`。
 - **未验证**：签名/公证（DMG 已产出）、GUI 自动化、真实 Keychain 正向写入、真实 MCP 配置写入、并发/中断、Windows/Linux、部分 adapter 路径与 symlink 行为。
 - **已知限制**：静态审计是启发式规则非完备证明；MCP/凭据静态 unknown；封闭 Agent 只能人工证据且证据为用户输入；版本探测依赖 app bundle/CLI；插件只读、不试连 MCP；备份恢复未实现；MCP headers 明文；详见 §8、[VALIDATION.md](VALIDATION.md) 与 [SECURITY.md](SECURITY.md)。

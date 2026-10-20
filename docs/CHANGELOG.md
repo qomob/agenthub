@@ -2,6 +2,51 @@
 
 本项目遵循「没有验证过的能力不写成已提供」的原则；版本号从 `0.1.0` 起。
 
+## 0.4.0 — 2026-10-20
+
+修复用户反馈「技能库始终只有两个，实际本机不同 Agent 安装的技能很多」。把**扫描发现**做成 Skills 页一等公民，并新增批量采纳（central library import）。
+
+> 产物状态：**0.4.0 `.app`（7.52 MiB）与 `AgentHub_0.4.0_aarch64.dmg`（3.97 MiB）已于 2026-10-20 17:36–17:37 构建**，`/Applications/AgentHub.app` 已覆盖安装 0.4.0。签名/公证未做。
+
+### Added
+
+- **Skills 页「中央库 (N) / 扫描发现 (M)」Tabs**：`/skills?tab=discovered` 深链；扫描发现按 `(slug, contentHash)` 跨 Agent 分组去重，展示 已在库/未入库/只读来源、涉及 Agent、路径、体积；搜索/状态筛选（未入库/已在库/只读）、每页 100 行加载更多；选择与分页独立。
+- **批量导入中央库**：新 Tauri 命令 `skills_import_scan`；新 CLI `skills adopt [--agents ...] [--include-read-only] [--max N] [--dry-run] [--yes]`。确认对话框显示数量/体积/目标 Agent/路径，明确「只复制到中央库、不改 Agent 目录」；后端默认跳过只读来源（builtin/marketplace/workspace/connector），按 `(slug, contentHash)` 去重、跳过已在库、失败逐条返回；dry-run 可预览。
+- **`DiscoveredSkill.rootSource`**：扫描写入 rootSource 分类（adapter/project/custom/builtin/marketplace/workspace/connector/shared/unknown）。
+- **入口**：Dashboard 未入库非只读技能计数卡 + `/skills?tab=discovered`；Agents「查看扫描发现」；Onboarding 扫描步骤显示可导入数量。
+- **测试**：`crates/agenthub-core/tests/scan_adopt.rs` 2 个（跨 Agent 去重/只读跳过/dryRun 不写/重复幂等/include-read-only；按 Agent 过滤）；前端 `discovered.spec.ts` 9 个。
+- **文档**：README/PRD/ARCHITECTURE/UI-SPEC/ADAPTER-SPEC/TEST-PLAN/ROADMAP/ACCEPTANCE-REPORT 更新采纳工作流。
+
+### Changed
+
+- Skills 页从「只显示已导入中央库」改为「中央库 + 扫描发现」双 Tab 工作流。
+- 扫描结果现在携带 `rootSource`；旧 scan payload 缺字段按 `unknown` 处理（`#[serde(default)]`）。
+- Tauri 命令数 47 → 48；后端 `ScanImportRequest/ScanImportResult`，审计写 `skills.adopt_scan`。
+
+### Fixed
+
+- **用户反馈：技能库只有两个**：真实机器重新扫描 **396** 候选 → 跳过只读 **273**、重复 **11**、导入 **112**（约 **55 MB**，失败 **0**）→ 中央库 capability **2 → 111**（112 次导入按版本共存形成 111 个 capability）。证据 `/tmp/agenthub-adopt-real/`。
+- 批量采纳默认不导入 Agent 内置/市场缓存，避免把无关缓存全部复制进库。
+
+### Known issues
+
+| 严重度 | 问题 | 参考 |
+|---|---|---|
+| 中 | 未签名/未公证（0.4.0 DMG 已产出并安装） | 本文件版本状态 |
+| 中 | 批量采纳只复制文件；不验证运行/依赖/审计（需后续用 Validator/Health） | PRD K / VALIDATION |
+| 低 | 只读来源需显式 `--include-read-only`；默认 273 条不导入，可能低于用户预期 | README/CLI help |
+| 低 | 同名不同内容会形成多个 capability version；UI 按 slug 展示版本关系 | DATA-MODEL |
+
+### Verification status
+
+- `./scripts/cargo.sh test -p agenthub-core`：**82 passed / 0 failed**（44 unit + 38 integration；新增 scan_adopt 2）。
+- `./scripts/cargo.sh test -p agenthub-cli`：**16 passed / 0 failed**；Rust 合计 **98 passed**。
+- `pnpm test`：**8 files / 38 tests passed**；`pnpm build` 通过。
+- 真实 Mac：396→112/111、55MB、失败 0；证据 `/tmp/agenthub-adopt-real/`。
+- 未验证：GUI 手动批量采纳点击流、真实只读来源 include 行为差异、签名/公证。
+
+---
+
 ## 0.3.0 — 2026-10-20
 
 新增两个 Agent 适配器（Qwen Work / Doubao Work），适配器总数 **9 → 11**；新增 4 个集成测试与真实 Mac 适配器验收。
@@ -235,6 +280,6 @@
 
 ## 状态标记说明
 
-- **已验证**：代码路径 + 真实命令/测试输出（core 80、CLI 16、前端 29、`pnpm build`、完整 `pnpm tauri build`、第一轮真实 Mac 安装验收、第二轮真实 Mac validator 验收、第三轮真实 adapter 验收、GUI 运行验收）。
+- **已验证**：代码路径 + 真实命令/测试输出（core 82、CLI 16、前端 38、`pnpm build`、完整 `pnpm tauri build`、第一轮真实 Mac 安装验收、第二轮 validator、第三轮 adapter、0.4 批量采纳 396→112/111、GUI）。
 - **未验证**：签名/公证（DMG 已产出）、GUI 自动化、真实 Keychain 正向、真实 MCP 配置写入、并发/中断、非 macOS、部分 adapter 路径。
 - **已知限制**：见上文 Known issues（静态审计启发式、人工证据用户输入、headers 明文、secret argv、备份/快照含凭据、备份恢复、项目 scope、签名/公证等）。

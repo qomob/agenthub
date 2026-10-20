@@ -27,3 +27,9 @@ src-tauri/target/
 *.log
 coverage/
 .tmp-test/
+
+# Local skill artifacts the user keeps next to the project (not part of AgentHub)
+/skill-compiler/
+/skillforge/
+/xskill-are/
+/*.zip

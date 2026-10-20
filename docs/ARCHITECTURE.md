@@ -17,7 +17,7 @@ AgentHub 是「本地 Agent 能力控制中心（Capability Control Center）」
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
 │ 表现层                                                               │
-│  Vue 3 UI (src/**，11 路由/12 视图)  Tauri 命令层 (47 个命令)         │
+│  Vue 3 UI (src/**，11 路由/12 视图)  Tauri 命令层 (48 个命令)         │
 │  CLI (crates/agenthub-cli，已实现，薄前端；health/audit/deps/...)     │
 └───────────────────────────────┬──────────────────────────────────────┘
                                 │ 同一入口：AgentHub 服务
@@ -56,12 +56,12 @@ AgentHub 是「本地 Agent 能力控制中心（Capability Control Center）」
 
 | 层 | 文件 | 职责 | 不做什么 |
 |---|---|---|---|
-| 命令层 | `src-tauri/src/lib.rs` | 47 个 `#[tauri::command]`；管理 `AppState`；把错误转成 `String` | 不含业务规则 |
-| 外观/服务 | `service.rs` | 唯一业务入口；读设置、拼计划、调 Executor、组装 View | 不直接写 Agent 配置（MCP 例外见 §7） |
+| 命令层 | `src-tauri/src/lib.rs` | 48 个 `#[tauri::command]`；管理 `AppState`；把错误转成 `String` | 不含业务规则 |
+| 外观/服务 | `service.rs` | 唯一业务入口；读设置、拼计划、调 Executor、组装 View；`import_scan_skills` 批量采纳 | 不直接写 Agent 配置（MCP 例外见 §7） |
 | 事务执行 | `ops.rs` | preflight → snapshot → apply → verify → record；失败补偿；rollback | 不解析 SKILL.md |
 | MCP | `mcp.rs` | MCP 定义 CRUD、发现、计划、格式 codec、Keychain、配置写回 | 不管理 Skill |
 | Skill | `skill.rs` | frontmatter 解析/校验、目录发现、zip 解压、git clone、staging | 不决定装到哪 |
-| 扫描 | `scan.rs` | 遍历各 Agent 的 skill roots，读 SKILL.md，刷新 `scan_results` | 绝不写 Agent 目录 |
+| 扫描 | `scan.rs` | 遍历各 Agent 的 skill roots，读 SKILL.md，刷新 `scan_results`；写 `rootSource` 分类 | 绝不写 Agent 目录 |
 | 适配器 | `adapters/mod.rs` + `builtin.rs` | 路径/检测/能力声明/插件发现 | 不执行写入 |
 | 中央库 | `library.rs` | 目录布局、版本存储、快照目录、完整备份 | 不持有数据库连接 |
 | 持久化 | `db.rs` | SCHEMA_V1 + SCHEMA_V2、`PRAGMA user_version` 迁移、所有 SQL | 不读文件系统 |
@@ -310,6 +310,37 @@ sequenceDiagram
 
 ---
 
+### 2.8 扫描发现 → 批量采纳（0.4.0）
+
+```mermaid
+sequenceDiagram
+    participant U as UI/CLI
+    participant S as AgentHub
+    participant SC as scan.rs
+    participant DB as scan_results
+    participant IMP as import_skill
+    U->>S: skills scan
+    S->>SC: 遍历 Agent roots + read SKILL.md
+    SC->>SC: classify_root_source(path)
+    SC->>DB: 每个发现写 scope + payload(rootSource/hash/size/…)
+    U->>S: Skills「扫描发现」/ skills adopt
+    S->>DB: list_scan_results（按 agent/paths 过滤）
+    S->>S: 按 (slug, contentHash) 去重
+    S->>S: 跳过只读 rootSource（默认）+ 已在库
+    S->>IMP: import_skill(AgentDir)（复制到中央库）
+    IMP-->>S: capability/version
+    S-->>U: ScanImportResult{imported, skipped*, failed}
+```
+
+关键点：
+
+- `rootSource` 来自 `adapters::classify_root_source`：`builtin`（包含 `builtin_skills`）、`marketplace`（`skills-marketplace`/`marketplace`）、`workspace`（路径含 `/work/`）、`connector`（`connectors/skills`）、`shared`（以 `.agents/skills` 结尾）、否则 `adapter`；custom root 为 `custom`，项目根为 `project`。
+- 只读来源集合：`builtin/marketplace/workspace/connector`；默认跳过，需 `include_read_only_sources` 显式开启。
+- 去重键是 `(slug, content_hash)`；同一内容跨 Agent 只导一次，同名不同内容形成多个 capability version（114 导入 → 111 capability 的情况正是如此）。
+- 导入复用 `import_skill(ImportSource::AgentDir)`：只复制到中央库，不修改 Agent 目录；失败逐条进入 `failed`，不中断批次。
+- `max_items` 默认 500（后端）/CLI `--max` 默认 200；`dry_run` 只计算 planned 导入，不写库。
+- 审计：写 `skills.adopt_scan` JSONL（总候选/导入/跳过/失败/是否含只读），不含文件内容。
+
 ## 3. 事务、快照与一致性
 
 ### 3.1 事务边界
@@ -464,9 +495,9 @@ MCP 的格式扩展点集中在 `mcp.rs`：
 | 4 | `target_within_roots` 未被调用 | `ops.rs:870-882`（grep 无调用方） | 目标路径合法性仅靠 preflight 的绝对路径检查 + adapter 生成的根 |
 | 5 | 项目级安装语义 | `pick_install_root` 只区分 custom/global（`service.rs:1081-1108`），项目根按 custom root 处理 | `installations.scope` 可写 global/custom；项目级独立流程未实现 |
 | 6 | `scan_on_startup` 未在核心启动时生效 | `service.rs:117` 仅种值；`open()` 不扫描 | UI 在 `App.vue` 中按设置触发扫描；核心本身不自动扫描 |
-| 7 | 核心纯函数仍有覆盖缺口 | core 80（44 unit + 36 integration）、CLI 16、前端 29；Rust 96 | 已有大量单测；仍非全量穷举 |
+| 7 | 核心纯函数仍有覆盖缺口 | core 82（44 unit + 38 integration）、CLI 16、前端 38；Rust 98 | 已有大量单测；仍非全量穷举 |
 | 8 | 完整备份无恢复路径 | `library.rs` 只有 create/list | 备份只能手工拷回，UI 无恢复入口 |
-| 9 | 签名/公证 | 0.3.0 DMG 已产出（`AgentHub_0.3.0_aarch64.dmg`，3.96 MiB，16:48）；无签名/公证配置 | 本机构建 app+DMG 可用并已覆盖安装；分发给他人前需 Developer ID 签名 + notarization |
+| 9 | 签名/公证 | 0.4.0 DMG 已产出（`AgentHub_0.4.0_aarch64.dmg`，3.97 MiB，17:37）；无签名/公证配置 | 本机构建 app+DMG 可用并已覆盖安装；分发给他人前需 Developer ID 签名 + notarization |
 | 10 | `doctor().home` 命名 | `service.rs` 返回 `data_dir` | 字段名为历史遗留，实际是数据目录；文档/UI 标注为「数据目录」 |
 | 11 | 静态审计是启发式 | `audit.rs` 规则匹配 | 可能漏报/误报；不是完备安全证明，不执行脚本/不联网 |
 | 12 | 人工证据是用户输入 | `validation_runs.notes/evidence` | 真实性由用户负责；不自动判定通过、不做防伪 |
@@ -479,7 +510,7 @@ MCP 的格式扩展点集中在 `mcp.rs`：
 
 ## 9.5 状态标记（已验证 / 未验证 / 已知限制）
 
-- **已验证**：分层/事务/快照/回滚与 CLI 复用；验证平台（audit/deps/impact/validation/agent_health）与 DB v2；**真实 Mac 验收**（第一轮安装/分发/更新/回滚；第二轮 DB v1→v2、真实 Agent 版本、真实 audit/deps/impact/validate，见 [ACCEPTANCE-REPORT.md](ACCEPTANCE-REPORT.md)、[VALIDATION.md](VALIDATION.md)）；GUI（隔离 home）运行；core 80、CLI 16、前端 29（Rust 96）测试通过；真实 adapter 验收覆盖 Qwen Work / Doubao Work。
+- **已验证**：分层/事务/快照/回滚与 CLI 复用；验证平台（audit/deps/impact/validation/agent_health）与 DB v2；**真实 Mac 验收**（第一轮安装/分发/更新/回滚；第二轮 DB v1→v2、真实 Agent 版本、真实 audit/deps/impact/validate，见 [ACCEPTANCE-REPORT.md](ACCEPTANCE-REPORT.md)、[VALIDATION.md](VALIDATION.md)）；GUI（隔离 home）运行；core 82、CLI 16、前端 38（Rust 98）测试通过；真实 adapter 验收覆盖 Qwen Work / Doubao Work；真实批量采纳 396→112/111。
 - **未验证**：签名/公证（DMG 已产出）、GUI 自动化、真实 Keychain 正向写入、真实 MCP 配置写入、并发/中断/磁盘满、非 macOS。
 - **已知限制**：见上表（静态审计启发式、人工证据用户输入、MCP headers/空表、项目级安装语义、备份不可恢复、`target_within_roots` 未接入、签名/公证）。
 

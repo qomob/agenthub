@@ -2,7 +2,7 @@
 
 > **本机 Agent 能力控制中心**：集中登记散落在 Codex、TRAE、ZCode、WorkBuddy、DeepSeek Harness、Qwen Work、Doubao Work 等 Agent 目录里的 **Skills / MCP / 插件清单**，通过适配器事务化分发，并用 **静态审计 + 依赖诊断 + 更新影响 + 人工验证证据 + Agent 版本健康** 回答「装没装、能不能用、安不安全、更新后会不会坏」。
 >
-> 状态快照：**2026-10-20 16:44（Asia/Shanghai）**。**第三轮适配器扩展已落地**：新增 Qwen Work / Doubao Work（总数 11）；此前第二轮 Validation Platform（DB v2、静态审计/依赖/影响/人工证据、Agent Health、CLI/UI）与**真实 Mac validator 验收通过**（真实 `~/.agenthub` v1→v2 迁移、真实 Agent 版本、真实审计/依赖/影响/证据）。测试：core **80**（44 unit + 36 integration，含 adapters_extended 4）+ CLI **16** = **96 个 Rust 测试**，前端 **7 files / 29 tests**，全部通过。适配器总数 **11**（新增 Qwen Work / Doubao Work）：Qwen Work 本机 VERIFIED（31 个真实技能、版本 1.3.1），Doubao Work 本机 NOT_INSTALLED/VR。代码版本 **0.3.0**；**0.3.0 `.app` 与 `.dmg` 已构建并覆盖安装 `/Applications`**（16:47–16:48）；签名/公证未做。详见 [docs/VALIDATION.md](docs/VALIDATION.md)、[docs/ACCEPTANCE-REPORT.md](docs/ACCEPTANCE-REPORT.md)、[已知限制](#已知限制)。
+> 状态快照：**2026-10-20 17:37（Asia/Shanghai）**。**0.4.0 技能库可见性修复已落地**：Skills 页新增「中央库 / 扫描发现」，支持跨 Agent 去重、批量导入中央库与 `skills adopt`；真实机器重新扫描 396 候选 → 跳过只读 273、重复 11、导入 **112** 个（55 MB、失败 0），中央库能力数从 2 → **111**。此前适配器扩展（Qwen Work / Doubao Work，总数 11）与 Validation Platform 仍在。测试：core **82**（44 unit + 38 integration，含 scan_adopt 2）+ CLI **16** = **98 个 Rust 测试**，前端 **8 files / 38 tests**，全部通过。代码版本 **0.4.0**；**0.4.0 `.app` 与 `.dmg` 已构建并覆盖安装 `/Applications`**（17:36–17:37）；签名/公证未做。详见 [docs/VALIDATION.md](docs/VALIDATION.md)、[docs/ACCEPTANCE-REPORT.md](docs/ACCEPTANCE-REPORT.md)、[已知限制](#已知限制)。
 
 AgentHub 是 **本地优先** 的 macOS 桌面应用（Tauri 2 + Vue 3 + Rust + SQLite），无账号、无云端、无遥测。GUI 与 CLI 共用同一个 `agenthub-core` 引擎。
 
@@ -30,7 +30,7 @@ AgentHub 是 **本地优先** 的 macOS 桌面应用（Tauri 2 + Vue 3 + Rust + 
 
 ## 状态标记
 
-- **已验证**：真实 Mac 安装/分发/更新/回滚验收；GUI 隔离 home 运行验收；**真实 Mac validator 验收**；**真实适配器验收**（11 Agent；Qwen Work installed/1.3.1/31 技能，Doubao Work not_installed）；core 80 + CLI 16 = **96 个 Rust 测试**、前端 29 个测试、`pnpm build`、完整 `pnpm tauri build` 全部通过。
+- **已验证**：真实 Mac 安装/分发/更新/回滚验收；GUI 隔离 home 运行验收；**真实 Mac validator 验收**；**真实适配器验收**（11 Agent；Qwen Work installed/1.3.1/31 技能，Doubao Work not_installed）；core 82 + CLI 16 = **98 个 Rust 测试**、前端 38 个测试、`pnpm build`、完整 `pnpm tauri build` 全部通过。
 - **未验证**：签名/公证（DMG 已产出）、GUI 自动化回归、真实 Keychain 正向写入、真实 MCP 配置写入、并发/中断/磁盘满、非 macOS、部分 adapter 路径（Codex 项目级、Trae CN 项目根、ZCode 远程传输、WorkBuddy `staticHeaders`）。
 - **已知限制**：见下节；headers 明文、secret argv、快照/备份含 token、备份恢复未实现；静态审计是规则引擎不是完备安全证明，人工证据是用户输入；详见 [docs/SECURITY.md](docs/SECURITY.md)、[docs/VALIDATION.md](docs/VALIDATION.md)。
 
@@ -57,7 +57,7 @@ AGENTHUB_HOME=/tmp/agenthub-gui/home \
   /Applications/AgentHub.app/Contents/MacOS/agenthub
 ```
 
-> 构建：完整 `pnpm tauri build` 已于 2026-10-20 16:47–16:48 成功产出 **0.3.0** `target/release/bundle/macos/AgentHub.app`（7.50 MiB）与 `target/release/bundle/dmg/AgentHub_0.3.0_aarch64.dmg`（3.96 MiB）；`/Applications/AgentHub.app` 已覆盖安装 0.3.0。首次 DMG 尝试因沙箱 hdiutil 权限失败，随后在用户授权的完整权限下成功；签名/公证尚未配置。完整报告：[docs/ACCEPTANCE-REPORT.md](docs/ACCEPTANCE-REPORT.md)。
+> 构建：完整 `pnpm tauri build` 已于 2026-10-20 17:36–17:37 成功产出 **0.4.0** `target/release/bundle/macos/AgentHub.app`（7.52 MiB）与 `target/release/bundle/dmg/AgentHub_0.4.0_aarch64.dmg`（3.97 MiB）；`/Applications/AgentHub.app` 已覆盖安装 0.4.0。首次 DMG 尝试因沙箱 hdiutil 权限失败，随后在用户授权的完整权限下成功；签名/公证尚未配置。完整报告：[docs/ACCEPTANCE-REPORT.md](docs/ACCEPTANCE-REPORT.md)。
 
 ## 核心原则
 
@@ -94,6 +94,17 @@ AGENTHUB_HOME=/tmp/agenthub-gui/home \
 
 > 详细路径/证据见 [docs/ADAPTER-SPEC.md](docs/ADAPTER-SPEC.md) 与 [docs/AGENT-COMPATIBILITY.md](docs/AGENT-COMPATIBILITY.md)。
 
+## 技能库：扫描发现 → 批量入库（0.4.0）
+
+此前 Skills 页只显示「已导入中央库」的能力，本机各 Agent 目录里已有的技能看不到。0.4.0 将扫描发现做成一等公民：
+
+1. **扫描**：`skills scan` / 扫描按钮读取所有 Agent root，写入 `scan_results`，并在每条发现上记录 `rootSource`（adapter/project/custom/builtin/marketplace/workspace/connector/shared）。
+2. **发现 Tab**：Skills 页「中央库 (N) / 扫描发现 (M)」，深链 `/skills?tab=discovered`；按 `(slug, contentHash)` 跨 Agent 分组去重，显示 已在库/未入库、只读来源、涉及 Agent、路径、体积；支持搜索/状态筛选（未入库/已在库/只读）、每页 100 行加载更多。
+3. **选择与确认**：选择与分页独立；确认对话框显示数量/体积/目标 Agent/将导入路径，明确「只复制到中央库，不改 Agent 目录」。
+4. **批量导入**：Tauri `skills_import_scan` / CLI `skills adopt`；默认跳过只读来源（builtin/marketplace/workspace/connector），按 `(slug, contentHash)` 去重、跳过已在库；失败逐条返回；`--dry-run` 可预览。
+5. **入口**：Dashboard 在存在未入库非只读技能时显示真实入口；Agents 页有「查看扫描发现」；Onboarding 扫描步骤提示可导入数量。
+6. **真实结果**：用户机器重新扫描 **396** 候选 → 跳过只读 **273** / 重复 **11** → 导入 **112**（约 **55 MB**，失败 0）→ 中央库能力数 **2 → 111**（112 次导入按版本共存形成 111 个 capability）。证据 `/tmp/agenthub-adopt-real/`。
+
 ## 功能状态
 
 状态：✅ 已实现（代码可证）/ 🟡 部分或未验证 / ⛔ 未实现 / ⚠️ 已知缺陷。
@@ -103,6 +114,7 @@ AGENTHUB_HOME=/tmp/agenthub-gui/home \
 | 能力 | 状态 | 说明 |
 |---|---|---|
 | 11 个 Agent 检测与 roots 盘点（含 Qwen Work / Doubao Work） | ✅ | `crates/agenthub-core/src/adapters/builtin.rs`；Qwen 本机 VERIFIED，Doubao 本机 NOT_INSTALLED/VR |
+| 扫描发现 → 批量入库中央库（0.4.0） | ✅ | Skills「扫描发现」Tab + `skills adopt`；跨 Agent 按 `(slug, contentHash)` 去重、默认跳过只读来源；真实 396→112（111 capability）/55MB |
 | 只读扫描（全局/项目/自定义） | ✅ | 同内容跨 Agent 计 duplicate，同 slug 不同内容计 conflict |
 | 导入：folder / zip / SKILL.md / Git / Agent 目录 | ✅ | zip 有路径穿越/symlink/大小/条目数防护 |
 | 中央库版本化（内容寻址） | ✅ | `library/skills/<slug>/<hash12>/` |
@@ -110,7 +122,7 @@ AGENTHUB_HOME=/tmp/agenthub-gui/home \
 | 更新检测 / 漂移 / 缺失检测 | ✅ | Dashboard 与 `check_changes` |
 | 操作级回滚 | ✅ | 每个操作最多一次；拒绝覆盖外部修改 |
 | CLI | ✅ | 计划门禁、`--json`、退出码 0/1/2 |
-| 测试 | ✅ | core 80、CLI 16（Rust 合计 96）、前端 29 通过（2026-10-20 16:44 实测） |
+| 测试 | ✅ | core 82、CLI 16（Rust 合计 98）、前端 38 通过（2026-10-20 17:32 实测） |
 | GUI | ✅ | 11 条导航路由 + 12 视图 + 20 组件；`pnpm build` 通过；隔离 home 人工运行验收 |
 | 真实 Mac 验收 | ✅ | 导入/分发/扫描/更新/回滚/卸载/备份/doctor；见 ACCEPTANCE-REPORT |
 
@@ -230,7 +242,7 @@ source scripts/cargo-env.sh
 pnpm tauri build
 ```
 
-> **当前快照的构建状态**：`pnpm build` 已通过（`vue-tsc --noEmit` + Vite，dist 生成）；完整 `pnpm tauri build` 已通过并产出 0.3.0 `AgentHub.app`（7.50 MiB）与 `AgentHub_0.3.0_aarch64.dmg`（3.96 MiB，2026-10-20 16:47–16:48），`/Applications/AgentHub.app` 已覆盖安装 0.3.0；首次 DMG 尝试因沙箱 hdiutil 权限失败，完整权限重跑成功。签名/公证未做。
+> **当前快照的构建状态**：`pnpm build` 已通过（`vue-tsc --noEmit` + Vite，dist 生成）；完整 `pnpm tauri build` 已通过并产出 0.4.0 `AgentHub.app`（7.52 MiB）与 `AgentHub_0.4.0_aarch64.dmg`（3.97 MiB，2026-10-20 17:36–17:37），`/Applications/AgentHub.app` 已覆盖安装 0.4.0；首次 DMG 尝试因沙箱 hdiutil 权限失败，完整权限重跑成功。签名/公证未做。
 
 ### 5. 只构建 CLI
 
@@ -269,6 +281,12 @@ $BIN skills list
 # 分发：先预览（退出码 2），确认后加 --yes
 $BIN skills install <skill-id-or-slug> --agents codex,workbuddy --dry-run
 $BIN skills install <skill-id-or-slug> --agents codex,workbuddy --yes
+
+# 扫描发现 → 批量导入中央库（0.4.0）
+# 先用 `skills scan` 生成最近一次扫描结果
+$BIN skills adopt --dry-run                 # 预览将导入多少条（默认跳过只读来源）
+$BIN skills adopt --agents codex,workbuddy --max 100 --yes
+$BIN skills adopt --include-read-only --dry-run  # 显式包含 builtin/marketplace/workspace/connector
 
 # 更新/漂移检查：生成计划（不写）
 # 注意：仅有更新时 --dry-run 退出码 0；drift/missing/blocked/conflict 才 2
@@ -377,7 +395,7 @@ $BIN --home "$AGENTHUB_HOME" doctor
 | 类别 | 限制 |
 |---|---|
 | GUI | 已人工运行验收；无 Tauri 自动化回归；浏览器环境只能显示「请运行 pnpm tauri dev」 |
-| 打包/签名 | 0.3.0 DMG 已产出（`AgentHub_0.3.0_aarch64.dmg`）；未签名/未公证 |
+| 打包/签名 | 0.4.0 DMG 已产出（`AgentHub_0.4.0_aarch64.dmg`）；未签名/未公证 |
 | 测试 | 无 `src-tauri` 自动化测试；核心缺纯函数单元测试 |
 | MCP | DSH Cordis YAML、TRAE 全局、ZCode 原生项目配置未实现；删除后留空表/空对象；headers 明文 |
 | 能力范围 | 插件只读；不执行 skill 脚本；不试连 MCP；不提供市场/云同步/调用统计 |
@@ -385,6 +403,7 @@ $BIN --home "$AGENTHUB_HOME" doctor
 | 记录 | 扫描不写 `operations`（导入已写）；无通用 tracing 日志；备份无恢复路径 |
 | Scope | `installations.scope` 记录 global/custom；项目级安装仍按 custom root 处理 |
 | Adapter | Codex 项目级根、Trae CN 项目根、ZCode 远程传输、WorkBuddy `staticHeaders` 等仍未验证；ChatGPT 只读；Doubao MCP/插件 manual-only；Doubao 本机未安装；Qwen symlink/MCP 生效方式 VR；同名 app 未按 `CFBundleName` 区分 |
+| 扫描采纳 | 默认不导入只读来源（builtin/marketplace/workspace/connector）；选中只读来源需显式勾选；导入只复制到中央库、不改 Agent 目录；只读来源默认 273 条不导入 |
 | 平台 | 仅 macOS Apple Silicon；Windows/Linux 未验证 |
 | 回滚 | 若目标在操作后被外部修改，回滚会拒绝覆盖该项并返回 `partial` |
 
@@ -423,7 +442,7 @@ $BIN --home "$AGENTHUB_HOME" doctor
 
 ### DMG 打包（已成功；首次沙箱尝试失败）
 
-- 本机完整构建已产出 **0.3.0** `target/release/bundle/dmg/AgentHub_0.3.0_aarch64.dmg`（3.96 MiB，2026-10-20 16:48）与 `target/release/bundle/macos/AgentHub.app`（7.50 MiB，16:47），并已覆盖安装 `/Applications/AgentHub.app`（0.3.0）。
+- 本机完整构建已产出 **0.4.0** `target/release/bundle/dmg/AgentHub_0.4.0_aarch64.dmg`（3.97 MiB，2026-10-20 17:37）与 `target/release/bundle/macos/AgentHub.app`（7.52 MiB，17:36），并已覆盖安装 `/Applications/AgentHub.app`（0.4.0）。
 - 首次 DMG 尝试在受限沙箱内因 hdiutil 权限失败（当时目录中只有 `bundle_dmg.sh`）；随后在用户授权的完整权限下重跑成功。若在受限环境复现失败，请在普通桌面会话/有权限终端重跑 `source scripts/cargo-env.sh && pnpm tauri build`，这不是应用代码错误。
 - 尚未做 Developer ID 签名与 notarization。
 
@@ -443,7 +462,7 @@ open /Applications/AgentHub.app
 
 ### `pnpm test` 的 jsdom 警告
 
-- 输出中的 `Not implemented: Window's scrollTo()` 来自 jsdom 环境，不影响测试结果（7 个文件 / 29 个测试通过）。
+- 输出中的 `Not implemented: Window's scrollTo()` 来自 jsdom 环境，不影响测试结果（8 个文件 / 38 个测试通过）。
 
 ### 空白窗口 / 找不到 Tauri 后端
 
@@ -467,11 +486,11 @@ crates/agenthub-core/          # 核心引擎（无 Tauri 依赖）
     service.rs                 # AgentHub 门面（GUI/CLI 共用）
     skill.rs                   # SKILL.md 解析/导入安全
     util.rs                    # hash/原子写/路径安全
-  tests/                       # 32 个集成测试（含 validator 11）
+  tests/                       # 38 个集成测试（含 validator 11、scan_adopt 2、adapters_extended 4）
 crates/agenthub-cli/           # CLI（1324 行薄前端）
   tests/cli.rs                 # 9 个进程级测试
 src-tauri/                     # Tauri 2 命令层（47 个命令）
-src/                           # Vue 3 UI（App/router/12 views/20 components）
+src/                           # Vue 3 UI（App/router/12 views/21 components）
 docs/                          # PRD/架构/数据/适配器/安全/UI/测试/路线图/变更/验收报告/验证方法论
 docs/evidence/                 # GUI 验收截图（Dashboard/Onboarding/Health）
 scripts/cargo.sh|cargo-env.sh  # 固定 rustup stable + /tmp CARGO_HOME
@@ -492,7 +511,7 @@ scripts/real-acceptance.sh     # 真实 Mac 验收脚本（需授权）
 | [docs/UI-SPEC.md](docs/UI-SPEC.md) | 9+1 页面、任务流、状态/token、预览确认、实现状态 | ✅ 本次 |
 | [docs/TEST-PLAN.md](docs/TEST-PLAN.md) | 测试分层、隔离要求、场景矩阵、真实结果、人工验收 | ✅ 本次 |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Phase 0–5、Validation Platform、未来候选、风险登记 | ✅ 本次 |
-| [docs/CHANGELOG.md](docs/CHANGELOG.md) | 0.1.0 / 0.2.0 / 0.3.0 Added/Changed/Fixed/Known issues | ✅ 本次 |
+| [docs/CHANGELOG.md](docs/CHANGELOG.md) | 0.1.0 / 0.2.0 / 0.3.0 / 0.4.0 Added/Changed/Fixed/Known issues | ✅ 本次 |
 | [docs/VALIDATION.md](docs/VALIDATION.md) | 验证方法论、规则表、证据语义、健康状态机、限制与路线 | ✅ 新增 |
 | [docs/ACCEPTANCE-REPORT.md](docs/ACCEPTANCE-REPORT.md) | 真实 Mac 验收 + GUI 运行 + 构建/测试证据 + 未验证项 | ✅ 新增 |
 | [docs/evidence/](docs/evidence/) | GUI 验收截图（Dashboard / Onboarding / Health） | ✅ 新增 |
@@ -505,10 +524,10 @@ scripts/real-acceptance.sh     # 真实 Mac 验收脚本（需授权）
 ## 测试与验证
 
 ```bash
-# Rust（必须用 wrapper）：core 80 + CLI 16 = 96
+# Rust（必须用 wrapper）：core 82 + CLI 16 = 98
 ./scripts/cargo.sh test -p agenthub-core -p agenthub-cli
 
-# 前端：7 文件 / 29 测试
+# 前端：8 文件 / 38 测试
 pnpm test
 
 # 构建
@@ -518,16 +537,17 @@ pnpm tauri build
 
 **当前真实结果（2026-10-20 16:24）**：
 
-- `./scripts/cargo.sh test -p agenthub-core`：**80 passed / 0 failed**（44 unit + 36 integration；新增 adapters_extended 4）。
+- `./scripts/cargo.sh test -p agenthub-core`：**82 passed / 0 failed**（44 unit + 38 integration；新增 scan_adopt 2）。
 - `./scripts/cargo.sh test -p agenthub-cli`：**16 passed / 0 failed**（9 旧 + 7 validator CLI）。
-- Rust 合计 **96 passed / 0 failed**；`./scripts/cargo.sh check -p agenthub` exit 0。
-- `pnpm test`（vitest）：**7 文件 / 29 测试全部通过**。
+- Rust 合计 **98 passed / 0 failed**；`./scripts/cargo.sh check -p agenthub` exit 0。
+- `pnpm test`（vitest）：**8 文件 / 38 测试全部通过**。
 - `pnpm build`：**通过**（`vue-tsc --noEmit` + Vite build）。
-- `pnpm tauri build`（完整构建）：**通过**；0.3.0 产物 `AgentHub.app`（7.50 MiB）与 `AgentHub_0.3.0_aarch64.dmg`（3.96 MiB，16:47–16:48）；`/Applications/AgentHub.app` 已覆盖安装 0.3.0。首次 DMG 尝试因沙箱 hdiutil 权限失败，完整权限重跑成功。
+- `pnpm tauri build`（完整构建）：**通过**；0.4.0 产物 `AgentHub.app`（7.52 MiB）与 `AgentHub_0.4.0_aarch64.dmg`（3.97 MiB，17:36–17:37）；`/Applications/AgentHub.app` 已覆盖安装 0.4.0。首次 DMG 尝试因沙箱 hdiutil 权限失败，完整权限重跑成功。
 - **真实 Mac 验收**：通过；`skills sync --dry-run` 仅有更新时退出码 0（drift/missing/blocked/conflict 才 2）；回滚精确恢复 v1；卸载后库保留 2 版本；doctor ok。
 - **GUI 运行验收**：隔离 home 通过（含 Dashboard 健康摘要/健康页）；截图 `docs/evidence/gui-health.png`。
 - **真实 Mac validator 验收**：DB v1→v2、Agent 版本探测、audit/deps/impact/validate 全通过；证据 `/tmp/agenthub-validator-real/`。
 - **真实 Mac adapter 验收**：11 适配器、396 技能、Qwen 31 技能/1.3.1、Doubao not_installed；证据 `/tmp/agenthub-adapters-real/`。
+- **真实 Mac 批量采纳（0.4.0）**：重新扫描 396 候选 → 默认跳过只读 273 + 去重 11 → 导入 112 个（约 55 MB，失败 0），中央库能力数 2 → **111**（112 条导入按版本共存形成 111 个 capability）；证据 `/tmp/agenthub-adopt-real/`。
 
 > 以上为真实输出摘要；完整证据与残留状态见 [docs/ACCEPTANCE-REPORT.md](docs/ACCEPTANCE-REPORT.md)。「测试通过」不包含签名/公证、GUI 自动化或真实 Keychain 正向写入（DMG 已产出）。
 

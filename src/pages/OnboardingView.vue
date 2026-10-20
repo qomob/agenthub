@@ -8,6 +8,7 @@ import Icon from '../components/Icon.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import { normalizeError } from '../lib/api'
 import { chooseDirectory } from '../lib/dialogs'
+import { countDefaultImportableGroups, groupDiscoveredSkills } from '../lib/discovered'
 import { formatDateTime } from '../lib/format'
 import {
   agentStatusKey,
@@ -66,6 +67,9 @@ const discovered = computed<DiscoveredRow[]>(() => {
     })),
   )
 })
+const importableCount = computed(() =>
+  countDefaultImportableGroups(groupDiscoveredSkills(scanReport.value)),
+)
 const invalidSkills = computed(() => discovered.value.filter((skill) => !skill.valid))
 const conflictSkills = computed(() => discovered.value.filter((skill) => skill.conflict))
 const agentScanErrors = computed(
@@ -393,6 +397,16 @@ async function finish(): Promise<void> {
               <div class="stat-card" :class="{ 'stat-tone-danger': scanReport.invalid > 0 }">
                 <div class="stat-head">{{ t('onboarding.scan.invalid') }}</div>
                 <div class="stat-value">{{ scanReport.invalid }}</div>
+              </div>
+            </div>
+
+            <div v-if="importableCount > 0" class="notice notice-info">
+              <Icon class="notice-icon" name="import" :size="14" />
+              <div class="notice-body">
+                <p class="notice-title">
+                  {{ t('onboarding.scan.importableTitle', { count: importableCount }) }}
+                </p>
+                <p>{{ t('onboarding.scan.importableHint') }}</p>
               </div>
             </div>
 

@@ -237,6 +237,8 @@ export interface DiscoveredSkill {
   version: string | null
   path: string
   root: string
+  /** Source classification of the root; empty for older scan payloads. */
+  rootSource: string
   scope: Scope
   agentKey: string | null
   contentHash: string
@@ -277,6 +279,41 @@ export interface ScanReport {
   conflicts: number
   invalid: number
   warnings: string[]
+}
+
+export interface ScanImportRequest {
+  agentIds: string[] | null
+  paths: string[] | null
+  includeReadOnlySources: boolean
+  maxItems: number | null
+  dryRun: boolean
+}
+
+export interface ScanImportedItem {
+  slug: string
+  name: string
+  versionLabel: string
+  agentKey: string | null
+  path: string
+  sizeBytes: number
+}
+
+export interface ScanImportFailure {
+  path: string
+  name: string
+  error: string
+}
+
+export interface ScanImportResult {
+  imported: ScanImportedItem[]
+  importedCount: number
+  skippedExisting: number
+  skippedDuplicate: number
+  skippedReadOnly: number
+  skippedLimit: number
+  failed: ScanImportFailure[]
+  totalCandidates: number
+  finishedAt: string
 }
 
 // ---------------------------------------------------------------------------

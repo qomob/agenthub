@@ -31,6 +31,8 @@ import type {
   PluginRecordView,
   ProfileUpsertRequest,
   ProfileView,
+  ScanImportRequest,
+  ScanImportResult,
   ScanReport,
   SecretState,
   SettingsUpdate,
@@ -132,6 +134,8 @@ export const api = {
   skillsList: () => call<Skill[]>('skills_list'),
   skillGet: (id: string) => call<SkillDetail>('skills_get', { id }),
   importSkill: (request: ImportRequest) => call<ImportResult>('skills_import', { request }),
+  skillsImportScan: (request: ScanImportRequest) =>
+    call<ScanImportResult>('skills_import_scan', { request }),
   planInstall: (request: InstallRequest) => call<OperationPlan>('skills_plan_install', { request }),
   planUninstall: (request: UninstallRequest) =>
     call<OperationPlan>('skills_plan_uninstall', { request }),
