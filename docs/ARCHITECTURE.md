@@ -39,7 +39,7 @@ AgentHub 是「本地 Agent 能力控制中心（Capability Control Center）」
 └───────────────────────────────┬──────────────────────────────────────┘
                                 │
 ┌───────────────────────────────▼──────────────────────────────────────┐
-│ adapters/  AgentAdapter trait + 9 个内置适配器 (builtin.rs)          │
+│ adapters/  AgentAdapter trait + 11 个内置适配器 (builtin.rs)         │
 │ library.rs 中央库布局/备份    db.rs SQLite    util.rs 安全文件操作    │
 └───────────────────────────────────┬──────────────────────────────────┘
                                     │
@@ -464,9 +464,9 @@ MCP 的格式扩展点集中在 `mcp.rs`：
 | 4 | `target_within_roots` 未被调用 | `ops.rs:870-882`（grep 无调用方） | 目标路径合法性仅靠 preflight 的绝对路径检查 + adapter 生成的根 |
 | 5 | 项目级安装语义 | `pick_install_root` 只区分 custom/global（`service.rs:1081-1108`），项目根按 custom root 处理 | `installations.scope` 可写 global/custom；项目级独立流程未实现 |
 | 6 | `scan_on_startup` 未在核心启动时生效 | `service.rs:117` 仅种值；`open()` 不扫描 | UI 在 `App.vue` 中按设置触发扫描；核心本身不自动扫描 |
-| 7 | 核心纯函数仍有覆盖缺口 | core 76（44 unit + 32 integration）、CLI 16、前端 29 | 已有大量单测；仍非全量穷举 |
+| 7 | 核心纯函数仍有覆盖缺口 | core 80（44 unit + 36 integration）、CLI 16、前端 29；Rust 96 | 已有大量单测；仍非全量穷举 |
 | 8 | 完整备份无恢复路径 | `library.rs` 只有 create/list | 备份只能手工拷回，UI 无恢复入口 |
-| 9 | 签名/公证 | 0.2.0 DMG 已产出（`AgentHub_0.2.0_aarch64.dmg`，3.95 MiB，16:34）；无签名/公证配置 | 本机构建 app+DMG 可用并已覆盖安装；分发给他人前需 Developer ID 签名 + notarization |
+| 9 | 签名/公证 | 0.3.0 DMG 已产出（`AgentHub_0.3.0_aarch64.dmg`，3.96 MiB，16:48）；无签名/公证配置 | 本机构建 app+DMG 可用并已覆盖安装；分发给他人前需 Developer ID 签名 + notarization |
 | 10 | `doctor().home` 命名 | `service.rs` 返回 `data_dir` | 字段名为历史遗留，实际是数据目录；文档/UI 标注为「数据目录」 |
 | 11 | 静态审计是启发式 | `audit.rs` 规则匹配 | 可能漏报/误报；不是完备安全证明，不执行脚本/不联网 |
 | 12 | 人工证据是用户输入 | `validation_runs.notes/evidence` | 真实性由用户负责；不自动判定通过、不做防伪 |
@@ -479,14 +479,14 @@ MCP 的格式扩展点集中在 `mcp.rs`：
 
 ## 9.5 状态标记（已验证 / 未验证 / 已知限制）
 
-- **已验证**：分层/事务/快照/回滚与 CLI 复用；验证平台（audit/deps/impact/validation/agent_health）与 DB v2；**真实 Mac 验收**（第一轮安装/分发/更新/回滚；第二轮 DB v1→v2、真实 Agent 版本、真实 audit/deps/impact/validate，见 [ACCEPTANCE-REPORT.md](ACCEPTANCE-REPORT.md)、[VALIDATION.md](VALIDATION.md)）；GUI（隔离 home）运行；core 76、CLI 16、前端 29 测试通过。
+- **已验证**：分层/事务/快照/回滚与 CLI 复用；验证平台（audit/deps/impact/validation/agent_health）与 DB v2；**真实 Mac 验收**（第一轮安装/分发/更新/回滚；第二轮 DB v1→v2、真实 Agent 版本、真实 audit/deps/impact/validate，见 [ACCEPTANCE-REPORT.md](ACCEPTANCE-REPORT.md)、[VALIDATION.md](VALIDATION.md)）；GUI（隔离 home）运行；core 80、CLI 16、前端 29（Rust 96）测试通过；真实 adapter 验收覆盖 Qwen Work / Doubao Work。
 - **未验证**：签名/公证（DMG 已产出）、GUI 自动化、真实 Keychain 正向写入、真实 MCP 配置写入、并发/中断/磁盘满、非 macOS。
 - **已知限制**：见上表（静态审计启发式、人工证据用户输入、MCP headers/空表、项目级安装语义、备份不可恢复、`target_within_roots` 未接入、签名/公证）。
 
 ## 10. 交叉链接
 
 - 数据表与字段：[DATA-MODEL.md](DATA-MODEL.md)
-- 适配器契约与 9 个 Agent：[ADAPTER-SPEC.md](ADAPTER-SPEC.md)
+- 适配器契约与 11 个 Agent：[ADAPTER-SPEC.md](ADAPTER-SPEC.md)
 - 安全边界：[SECURITY.md](SECURITY.md)
 - 页面与交互：[UI-SPEC.md](UI-SPEC.md)
 - 测试基线：[TEST-PLAN.md](TEST-PLAN.md)

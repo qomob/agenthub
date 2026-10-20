@@ -1183,23 +1183,13 @@ impl AgentHub {
     ) -> Option<(PathBuf, Scope)> {
         for custom in &record.custom_skill_roots {
             let path = PathBuf::from(custom);
-            if path.is_dir() {
+            if path.is_dir() || writable_ancestor(&path) {
                 return Some((path, Scope::Custom));
-            }
-            if let Some(parent) = path.parent() {
-                if parent.is_dir() && util::is_writable_dir(parent) {
-                    return Some((path, Scope::Custom));
-                }
             }
         }
         for path in adapter.install_roots(&self.config.home) {
-            if path.is_dir() {
+            if path.is_dir() || writable_ancestor(&path) {
                 return Some((path, Scope::Global));
-            }
-            if let Some(parent) = path.parent() {
-                if parent.is_dir() && util::is_writable_dir(parent) {
-                    return Some((path, Scope::Global));
-                }
             }
         }
         None
@@ -2649,6 +2639,18 @@ fn profile_view(row: ProfileRow) -> ProfileView {
         created_at: row.created_at,
         updated_at: row.updated_at,
     }
+}
+
+/// A directory may be created when its nearest existing ancestor is writable.
+fn writable_ancestor(path: &Path) -> bool {
+    let mut current = path;
+    while let Some(parent) = current.parent() {
+        if parent.is_dir() {
+            return util::is_writable_dir(parent);
+        }
+        current = parent;
+    }
+    false
 }
 
 fn plan_summary(items: &[PlanItem]) -> PlanSummary {

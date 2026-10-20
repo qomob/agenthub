@@ -493,7 +493,7 @@ Profiles → 应用 → `profiles_plan_apply`（可能返回多个 plan 合并�
 | 组件 | `src/components/*` | ✅ 20 个组件：新增 HealthStatusBadge、SkillHealthPanel、UpdateImpactSummary；其余同第一轮 |
 | 测试 | `src/lib/__tests__/*.spec.ts`、`src/__tests__/*.spec.ts` | ✅ **7 文件 / 29 测试**通过（新增 health-ui/health） |
 
-> 构建/测试状态快照（2026-10-20 16:34）：`pnpm build` 通过；`pnpm test` **7 文件 / 29 测试**通过；完整 `pnpm tauri build` 已产出 0.2.0 `AgentHub.app`（7.49 MiB）与 `AgentHub_0.2.0_aarch64.dmg`（3.95 MiB，16:33–16:34），`/Applications/AgentHub.app` 已覆盖安装 0.2.0；首次 DMG 尝试因沙箱 hdiutil 权限失败，完整权限重跑成功；未签名/未公证。页面视觉以最终组件为准；token、状态映射、命令签名与文案 key 不应另造一套。
+> 构建/测试状态快照（2026-10-20 16:48）：`pnpm build` 通过；`pnpm test` **7 文件 / 29 测试**通过；完整 `pnpm tauri build` 已产出 0.3.0 `AgentHub.app`（7.50 MiB）与 `AgentHub_0.3.0_aarch64.dmg`（3.96 MiB，16:47–16:48），`/Applications/AgentHub.app` 已覆盖安装 0.3.0；首次 DMG 尝试因沙箱 hdiutil 权限失败，完整权限重跑成功；未签名/未公证。页面视觉以最终组件为准；token、状态映射、命令签名与文案 key 不应另造一套。
 
 ---
 

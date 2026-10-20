@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/agenthub-core", "crates/agenthub-cli", "src-tauri"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 authors = ["AgentHub Contributors"]
 license = "MIT"

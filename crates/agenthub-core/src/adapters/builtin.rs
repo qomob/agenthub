@@ -30,6 +30,8 @@ pub fn all_adapters() -> Vec<Box<dyn AgentAdapter>> {
         Box::new(DshAdapter),
         Box::new(ClaudeCodeAdapter),
         Box::new(CursorAdapter),
+        Box::new(QwenWorkAdapter),
+        Box::new(DoubaoWorkAdapter),
     ]
 }
 
@@ -919,5 +921,243 @@ impl AgentAdapter for CursorAdapter {
             transports: vec![McpTransport::Stdio, McpTransport::Http],
             notes: vec!["Reserved adapter, Verification Required.".to_string()],
         }]
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// Qwen Work (千问工作 / QwenWorkCN)
+// ---------------------------------------------------------------------------
+
+/// Qwen Work is an Electron desktop agent. Verified on this machine:
+/// user skills live in `~/.qwenworkcn/skills`, plugins in
+/// `~/.qwenworkcn/plugins` and `~/.qwenworkcn/plugins-custom`, and the custom
+/// MCP config is the JSON file `~/.qwenworkcn/mcp.json` (`mcpServers` object).
+pub struct QwenWorkAdapter;
+
+impl AgentAdapter for QwenWorkAdapter {
+    fn id(&self) -> &'static str {
+        "builtin.qwen-work"
+    }
+    fn key(&self) -> &'static str {
+        "qwen-work"
+    }
+    fn name(&self) -> &'static str {
+        "Qwen Work (千问工作)"
+    }
+    fn vendor(&self) -> &'static str {
+        "Alibaba"
+    }
+    fn symlink_support(&self) -> SymlinkSupport {
+        SymlinkSupport::Unverified
+    }
+    fn plugin_support(&self) -> PluginSupport {
+        PluginSupport::FileManaged
+    }
+    fn official_url(&self) -> Option<&'static str> {
+        Some("https://qwenwork.cn/")
+    }
+    fn requires_restart_note(&self) -> Option<&'static str> {
+        Some("Qwen Work refreshes its skill catalog on session start; start a new conversation after changes.")
+    }
+
+    fn detect(&self, home: &Path) -> Detection {
+        detect_dirs(
+            home,
+            ".qwenworkcn",
+            &["QwenWorkCN.app", "Qwen Work.app", "QwenWork.app"],
+            vec![
+                "Qwen Work stores user skills in ~/.qwenworkcn/skills and custom MCP servers in ~/.qwenworkcn/mcp.json."
+                    .to_string(),
+            ],
+        )
+    }
+
+    fn skill_roots(&self, home: &Path) -> Vec<PathBuf> {
+        vec![home_dir(home, ".qwenworkcn/skills")]
+    }
+
+    fn install_roots(&self, home: &Path) -> Vec<PathBuf> {
+        vec![home_dir(home, ".qwenworkcn/skills")]
+    }
+
+    fn mcp_target_specs(&self, home: &Path) -> Vec<McpTargetSpec> {
+        vec![McpTargetSpec {
+            path: home.join(".qwenworkcn/mcp.json"),
+            format: "json:mcpServers",
+            scope: Scope::Global,
+            transports: vec![
+                McpTransport::Stdio,
+                McpTransport::Http,
+                McpTransport::StreamableHttp,
+            ],
+            notes: vec![
+                "Qwen Work custom MCP config; built-in connectors are managed inside the app and are not touched."
+                    .to_string(),
+            ],
+        }]
+    }
+
+    fn discover_plugins(&self, home: &Path, agent_id: &str) -> Vec<DiscoveredPlugin> {
+        let base = home_dir(home, ".qwenworkcn");
+        let mut out = Vec::new();
+        for root_name in ["plugins", "plugins-custom"] {
+            let root = base.join(root_name);
+            let Ok(entries) = std::fs::read_dir(&root) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                if !entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
+                    continue;
+                }
+                let plugin_dir = entry.path();
+                let manifest = plugin_dir
+                    .join(".codex-plugin/plugin.json")
+                    .exists()
+                    .then(|| plugin_dir.join(".codex-plugin/plugin.json"))
+                    .or_else(|| {
+                        plugin_dir
+                            .join(".qwen-plugin/plugin.json")
+                            .exists()
+                            .then(|| plugin_dir.join(".qwen-plugin/plugin.json"))
+                    })
+                    .or_else(|| {
+                        plugin_dir
+                            .join("plugin.json")
+                            .exists()
+                            .then(|| plugin_dir.join("plugin.json"))
+                    });
+                let Some(manifest) = manifest else { continue };
+                let Some(doc) = read_json(&manifest) else { continue };
+                let name = doc
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| entry.file_name().to_string_lossy().to_string());
+                out.push(DiscoveredPlugin {
+                    agent_id: agent_id.to_string(),
+                    agent_key: "qwen-work".to_string(),
+                    agent_name: "Qwen Work (千问工作)".to_string(),
+                    name,
+                    version: doc
+                        .get("version")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    source: Some(root_name.to_string()),
+                    install_state: "discovered".to_string(),
+                    permissions: Vec::new(),
+                    official_url: Some("https://qwenwork.cn/".to_string()),
+                    discovered_path: Some(plugin_dir.to_string_lossy().to_string()),
+                    notes: vec![
+                        "Read-only discovery from Qwen Work plugin directory.".to_string(),
+                    ],
+                });
+            }
+        }
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        out
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Doubao Work (豆包工作)
+// ---------------------------------------------------------------------------
+
+/// Doubao Work is largely UI/account-driven. Published community guidance places
+/// skills in a workspace-local `.user_skills` directory, while MCP connectors
+/// are added through the app UI ("技能 · 连接器 · 伙伴" → 新建自定义连接器).
+/// No stable local MCP config file is documented, so AgentHub never writes one.
+pub struct DoubaoWorkAdapter;
+
+impl AgentAdapter for DoubaoWorkAdapter {
+    fn id(&self) -> &'static str {
+        "builtin.doubao-work"
+    }
+    fn key(&self) -> &'static str {
+        "doubao-work"
+    }
+    fn name(&self) -> &'static str {
+        "Doubao Work (豆包工作)"
+    }
+    fn vendor(&self) -> &'static str {
+        "ByteDance"
+    }
+    fn symlink_support(&self) -> SymlinkSupport {
+        SymlinkSupport::Unverified
+    }
+    fn plugin_support(&self) -> PluginSupport {
+        PluginSupport::ManualOnly
+    }
+    fn official_url(&self) -> Option<&'static str> {
+        Some("https://www.doubao.com/")
+    }
+    fn requires_restart_note(&self) -> Option<&'static str> {
+        Some("Doubao Work discovers workspace skills when a session/workspace starts; refresh or restart the app.")
+    }
+
+    fn detect(&self, home: &Path) -> Detection {
+        let mut evidence = Vec::new();
+        if let Some(app) = find_app(
+            home,
+            &[
+                "Doubao.app",
+                "豆包.app",
+                "Doubao Work.app",
+                "豆包工作.app",
+            ],
+        ) {
+            evidence.push(app.to_string_lossy().to_string());
+        }
+        for candidate in [
+            home.join("Library/Application Support/Doubao"),
+            home.join("Library/Application Support/豆包"),
+            home.join(".doubao"),
+        ] {
+            if candidate.exists() {
+                evidence.push(candidate.to_string_lossy().to_string());
+            }
+        }
+        if evidence.is_empty() {
+            return Detection::not_installed(vec![
+                "Doubao Work desktop app/config was not found on this Mac.".to_string(),
+            ]);
+        }
+        let app_path = find_app(
+            home,
+            &["Doubao.app", "豆包.app", "Doubao Work.app", "豆包工作.app"],
+        );
+        Detection {
+            status: AgentStatus::VerificationRequired,
+            app_path,
+            home_path: evidence.first().map(PathBuf::from),
+            evidence,
+            notes: vec![
+                "Doubao Work manages plugins/connectors inside its UI; AgentHub cannot install them.".to_string(),
+                "Workspace skills are expected at <workspace>/.user_skills (community guidance, not yet verified on this Mac)."
+                    .to_string(),
+            ],
+        }
+    }
+
+    fn skill_roots(&self, _home: &Path) -> Vec<PathBuf> {
+        // No verified global skill directory: Doubao Work uses workspace-local
+        // .user_skills. Users can register a project folder on the Agents page.
+        Vec::new()
+    }
+
+    fn install_roots(&self, _home: &Path) -> Vec<PathBuf> {
+        Vec::new()
+    }
+
+    fn mcp_target_specs(&self, _home: &Path) -> Vec<McpTargetSpec> {
+        // Connectors are created through the app UI; no documented local file.
+        Vec::new()
+    }
+
+    fn project_skill_roots(&self, project: &Path) -> Vec<PathBuf> {
+        vec![
+            project.join(".user_skills"),
+            project.join(".doubao/skills"),
+        ]
     }
 }

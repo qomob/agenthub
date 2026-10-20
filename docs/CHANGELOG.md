@@ -2,6 +2,58 @@
 
 本项目遵循「没有验证过的能力不写成已提供」的原则；版本号从 `0.1.0` 起。
 
+## 0.3.0 — 2026-10-20
+
+新增两个 Agent 适配器（Qwen Work / Doubao Work），适配器总数 **9 → 11**；新增 4 个集成测试与真实 Mac 适配器验收。
+
+> 产物状态：**0.3.0 `.app`（7.50 MiB）与 `AgentHub_0.3.0_aarch64.dmg`（3.96 MiB）已于 2026-10-20 16:47–16:48 构建**，`/Applications/AgentHub.app` 已覆盖安装 0.3.0。签名/公证未做。
+
+### Added
+
+- **Qwen Work（千问工作，`qwen-work` / `builtin.qwen-work`，Alibaba）**：
+  - 检测 `/Applications/QwenWorkCN.app`（也支持 Qwen Work.app / QwenWork.app）或 `~/.qwenworkcn`；本机 **VERIFIED**（版本 1.3.1）。
+  - 技能根 `~/.qwenworkcn/skills`（本机真实 31 个技能：create-skill/dingtalk-*/pptx/xlsx/pdf/media-*/qwenwork-guidance 等）；无已验证项目级根。
+  - 插件目录常量 `~/.qwenworkcn/plugins`、`~/.qwenworkcn/plugins-custom`（目录可不存在；manifest `.codex-plugin/plugin.json`），只读发现。
+  - 自定义 MCP `~/.qwenworkcn/mcp.json`（JSON `mcpServers`；stdio command/args/env，HTTP/streamable-http url/type）；路径来自 app.asar 常量 `CUSTOM_MCP_CONFIG_PATH=constants.r("mcp.json")`，写入/移除保真由 `adapters_extended.rs` fixture 验证。
+  - symlink/热加载/MCP 真实生效方式 **VR**；无 CLI。
+- **Doubao Work（豆包工作，`doubao-work` / `builtin.doubao-work`，ByteDance）**：
+  - 检测候选 app 名 + `~/Library/Application Support/Doubao|豆包`、`~/.doubao`；本机 **NOT_INSTALLED**（只有豆包浏览器），存在时状态 **VerificationRequired**。
+  - 无已验证全局技能根；workspace 本地 `.user_skills`（社区指南）与 `.doubao/skills`（代码识别）；仅当用户注册 workspace 为 custom root 后可分发，否则 plan **blocked**。
+  - MCP/插件 **manual-only**：应用 UI「技能 · 连接器 · 伙伴」新建连接器/由 AI 安装；AgentHub 不写任何本地 MCP/插件文件。
+  - symlink/热加载 **VR**；参考官网/社区指南见 `AGENT-COMPATIBILITY.md §3.10`。
+- **测试**：新增 `crates/agenthub-core/tests/adapters_extended.rs` 4 个用例（注册表含 11、Qwen 检测/扫描/插件发现、Qwen MCP 写入/移除保真、Doubao workspace 扫描/无根 blocked/注册 custom root 后部署）。
+- **真实 Mac 适配器验收**：`agents list` 11 个（Qwen installed / Doubao not_installed）；`skills scan` 396 技能（invalid 5、conflicts 7），Qwen 31 个；`health --agents --record` 新增 Qwen 1.3.1。证据 `/tmp/agenthub-adapters-real/`。
+- 文档：AGENT-COMPATIBILITY / ADAPTER-SPEC / README / PRD / ROADMAP / TEST-PLAN 增加 Qwen/Doubao。
+
+### Changed
+
+- 适配器总数 9 → 11；UI Agents 列表自动显示，无需新页面。
+- README 支持 Agent 表新增 Qwen Work（本机 VERIFIED）与 Doubao Work（NOT_INSTALLED/VR）。
+- 版本 bump 到 **0.3.0**（Cargo.toml/package.json/tauri.conf.json）。
+
+### Fixed
+
+- 本轮无代码缺陷修复；新增测试覆盖两个 adapter 的检测/扫描/MCP/项目根行为。
+
+### Known issues
+
+| 严重度 | 问题 | 参考 |
+|---|---|---|
+| 中 | Qwen Work：symlink 行为、热加载、`mcp.json` 改动生效方式均 VR；MCP 写入只在 fixture 验证，未改真实配置 | AGENT-COMPATIBILITY §3.9 |
+| 中 | Doubao Work 本机未安装；workspace `.user_skills` 仅社区指南；MCP/插件 manual-only；无全局安装根 | AGENT-COMPATIBILITY §3.10 |
+| 中 | 未签名/未公证（0.3.0 DMG 已产出并安装） | 本文件版本状态 |
+| 低 | Qwen 插件目录本机不存在（代码常量）；Doubao 无版本来源 | ADAPTER-SPEC §3.5 |
+
+### Verification status
+
+- `./scripts/cargo.sh test -p agenthub-core`：**80 passed / 0 failed**（44 unit + 36 integration；含 adapters_extended 4）。
+- `./scripts/cargo.sh test -p agenthub-cli`：**16 passed / 0 failed**；Rust 合计 **96 passed**。
+- `pnpm test`：**7 files / 29 tests passed**；`pnpm build` 通过。
+- 真实 Mac 适配器证据：`/tmp/agenthub-adapters-real/`（agents/scan/agent-health JSON，err 为空）。
+- 未验证：Qwen symlink/热加载/MCP 生效方式；Doubao 全部（本机未安装）；签名/公证。
+
+---
+
 ## 0.2.0 — 2026-10-20
 
 产品定位升级为 **AgentHub · Capability Control Center**。第二轮落地 **Capability Validation Platform**：DB v2、静态审计、依赖/环境诊断、更新影响、人工验证证据、Agent Health Monitor、CLI/UI 新命令与页面。安装/同步继续复用第一轮事务引擎，不重复实现。
@@ -183,6 +235,6 @@
 
 ## 状态标记说明
 
-- **已验证**：代码路径 + 真实命令/测试输出（core 76、CLI 16、前端 29、`pnpm build`、完整 `pnpm tauri build`、第一轮真实 Mac 安装验收、第二轮真实 Mac validator 验收、GUI 运行验收）。
+- **已验证**：代码路径 + 真实命令/测试输出（core 80、CLI 16、前端 29、`pnpm build`、完整 `pnpm tauri build`、第一轮真实 Mac 安装验收、第二轮真实 Mac validator 验收、第三轮真实 adapter 验收、GUI 运行验收）。
 - **未验证**：签名/公证（DMG 已产出）、GUI 自动化、真实 Keychain 正向、真实 MCP 配置写入、并发/中断、非 macOS、部分 adapter 路径。
 - **已知限制**：见上文 Known issues（静态审计启发式、人工证据用户输入、headers 明文、secret argv、备份/快照含凭据、备份恢复、项目 scope、签名/公证等）。

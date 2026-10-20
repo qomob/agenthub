@@ -1,6 +1,6 @@
 # AgentHub 产品需求文档（PRD）
 
-> 版本：0.2（Capability Control Center）
+> 版本：0.3（Capability Control Center）
 > 日期：2026-10-20
 > 状态基准：以当前代码与实测为准。**「已实现」不等于「已验收」「已验证」**；本文在每个功能后区分「代码已实现 / 未验证 / 未实现」。
 > 关联：[ARCHITECTURE.md](ARCHITECTURE.md)、[ADAPTER-SPEC.md](ADAPTER-SPEC.md)、[TEST-PLAN.md](TEST-PLAN.md)、[AGENT-COMPATIBILITY.md](AGENT-COMPATIBILITY.md)
@@ -9,7 +9,7 @@
 
 ## 1. 产品定位
 
-**一句话**：AgentHub 是 macOS 上的本地 **Agent 能力控制中心（Capability Control Center）**——集中登记散落在 Codex、TRAE、ZCode、WorkBuddy、DSH 等 Agent 目录里的 Skills、MCP 配置和插件清单，事务化分发并回滚，同时用静态审计、依赖诊断、更新影响、人工验证证据与 Agent 版本健康回答「能不能用、安不安全、更新后会不会坏」。
+**一句话**：AgentHub 是 macOS 上的本地 **Agent 能力控制中心（Capability Control Center）**——集中登记散落在 Codex、TRAE、ZCode、WorkBuddy、DSH、Qwen Work、Doubao Work 等 Agent 目录里的 Skills、MCP 配置和插件清单，事务化分发并回滚，同时用静态审计、依赖诊断、更新影响、人工验证证据与 Agent 版本健康回答「能不能用、安不安全、更新后会不会坏」。
 
 **形态**：Tauri 2 桌面应用（Rust 核心 + Vue 3 UI），纯本地、无账号、无云端；同一 Rust 核心同时服务 GUI 与 CLI。
 
@@ -59,7 +59,7 @@ MVP **不面向**团队协作、企业管控、非 macOS 平台。
 | 2 | **Single Source of Truth** | 库内一份 canonical 版本，Agent 目录是部署副本；「装没装」查 `installations` 而非猜文件 | `library/skills/<slug>/<hash12>`；`installations` 唯一键 | 已验证 |
 | 3 | **Adapter First** | 每个 Agent 的差异集中在 `AgentAdapter`；执行器不写 Agent 特例 | `adapters/mod.rs:108-173`、`builtin.rs` | 已验证 |
 | 4 | **Non-destructive** | 不覆盖非 AgentHub 拥有的目标；写入前快照；删除只删自己装的；不删整个配置文件 | `preflight` 冲突/外部修改检查；`snapshot_target`；MCP 单条替换 | 已验证 |
-| 5 | **Capability-based** | 适配器显式声明能力等级（symlink/插件/传输/格式）；未验证能力不得声称可用 | `SymlinkSupport`/`PluginSupport`/`AgentStatus` | 部分（DSH symlink 声明与证据不一致） |
+| 5 | **Capability-based** | 适配器显式声明能力等级（symlink/插件/传输/格式）；未验证能力不得声称可用 | `SymlinkSupport`/`PluginSupport`/`AgentStatus` | 已验证（11 个 adapter；Doubao/Qwen 未验证项显式标注） |
 | 6 | **Transactional** | 一次操作要么全部成功，要么逆序补偿；失败不留半配置 | `ops::Executor` saga + 快照 + rollback | 已验证（Skill）；MCP 执行路径有缺陷 |
 | 7 | **No Fake Integration** | 没有真实证据/真实实现的集成不展示、不写入；未验证项明确标注 | ChatGPT 只检测不写；DSH MCP 不声明；Claude/Cursor 标 VerificationRequired | 已验证 |
 | 8 | **Verified, not assumed** | 安装 ≠ 可用 ≠ 已验证；只有审计/环境/人工证据支持的当前版本才是 `verified` | `validation::derive_health`；安全优先；旧版本证据失效 | 已验证（单测 + 真实 Mac） |
@@ -77,7 +77,9 @@ MVP **不面向**团队协作、企业管控、非 macOS 平台。
 
 | 子项 | 状态 | 说明 |
 |---|---|---|
-| 9 个内置适配器检测 | ✅ | `sync_agents()` 每次列表前刷新（`service.rs:132-169`） |
+| **11 个内置适配器检测** | ✅ | `sync_agents()` 每次列表前刷新（`service.rs:132-169`） |
+| Qwen Work（千问工作） | ✅ | 本机 VERIFIED：`QwenWorkCN.app` 1.3.1、`~/.qwenworkcn/skills`（31 技能）、`~/.qwenworkcn/mcp.json`；插件只读；symlink/热加载/MCP 生效方式 VR |
+| Doubao Work（豆包工作） | ⚠️ 部分 | 本机 NOT_INSTALLED；存在时状态 VerificationRequired；无全局根，workspace `.user_skills`；MCP/插件 manual-only；需注册 custom root 才可分发 |
 | 展示 evidence（真实路径） | ✅ | `Detection.evidence`，`doctor()` 输出 |
 | 自定义 home / app 目录 | ✅ | `AGENTHUB_HOME`、`AGENTHUB_EXTRA_APP_DIRS` |
 | 用户覆盖 Agent 路径 / 自定义 skill 根 | ✅ | `agents_update_paths`；custom root 参与扫描与安装；`AgentView.customSkillRoots` 暴露给 UI |
@@ -355,7 +357,7 @@ CLI 验收时加 `--home /tmp/agenthub-accept/home`（等价于 `AGENTHUB_HOME`�
 
 | 维度 | 标准 | 当前 |
 |---|---|---|
-| 覆盖 | 至少 3 个本机 Agent 可检测、可读、可分发 | 代码支持 9 个；本机证据覆盖 6 个 |
+| 覆盖 | 至少 3 个本机 Agent 可检测、可读、可分发 | 代码支持 **11 个**；本机真实证据：11 个适配器中 Qwen installed、Doubao not_installed，扫描 396 技能（Qwen 31） |
 | 安全 | 不覆盖非托管目标；任何失败可恢复；不读取凭据文件内容 | 代码具备；MCP env 计划已脱敏；真实 Mac 验收未覆盖失败注入 |
 | 可解释 | 每次操作有计划、结果、快照、错误原因 | 具备（缺 import/scan 记录） |
 | 可用 | GUI 完成「扫描 → 导入 → 分发 → 更新 → 回滚」 | **已达成（人工验收）**：真实 Mac CLI 全流程 + 隔离 home GUI；自动化 GUI 回归待补 |
@@ -373,6 +375,8 @@ CLI 验收时加 `--home /tmp/agenthub-accept/home`（等价于 `AGENTHUB_HOME`�
 | 签名/公证未完成 | app 与 DMG 已构建/安装；未签名/未公证 | 配置 Developer ID + notarization |
 | 真实 Agent 目录写入风险 | 误写可能影响用户日常使用 | 默认隔离 home；真实验收使用唯一 slug、目标不存在才执行、失败清理，并已获用户授权 |
 | Adapter 证据漂移 | 私有格式变化导致写入无效 | 文档标注证据日期；codec 独立测试 |
+| Qwen Work 未验证项 | symlink/热加载/MCP 生效方式 | VR；默认 copy；MCP 写入 fixture 验证、真实生效需人工确认 |
+| Doubao Work 本机未安装 | 无法端到端验证 | 标记 NOT_INSTALLED/VR；MCP/插件 manual-only；不猜测全局根 |
 | DSH symlink 声明与证据不一致 | 默认 copy，浪费已验证能力 | 证据复核后改 `Supported` |
 | Keychain 授权 | `security` CLI 首次可能弹授权/拒绝 | 诊断页显示 `keychainAvailable`；失败给出提示 |
 | 静态审计误报/漏报 | 规则引擎无法覆盖所有恶意模式 | 明确「启发式、非完备安全证明」；保留 finding 可解释性；后续规则演进 |
@@ -382,6 +386,6 @@ CLI 验收时加 `--home /tmp/agenthub-accept/home`（等价于 `AGENTHUB_HOME`�
 
 ## 9. 已验证 / 未验证 / 已知限制
 
-- **已验证**：真实 Mac 安装/分发/更新/回滚验收；GUI（隔离 home）运行验收；真实 Mac validator 验收（DB v1→v2、真实 Agent 版本、audit/deps/impact/validate）；core 76 + CLI 16 = 92 个 Rust 测试、前端 29 个测试、`pnpm build`、完整 `pnpm tauri build`。
+- **已验证**：真实 Mac 安装/分发/更新/回滚验收；GUI（隔离 home）运行验收；真实 Mac validator 验收；真实 Mac adapter 验收（11 适配器、396 技能、Qwen 31/1.3.1、Doubao not_installed）；core 80 + CLI 16 = 96 个 Rust 测试、前端 29 个测试、`pnpm build`、完整 `pnpm tauri build`。
 - **未验证**：签名/公证（DMG 已产出）、GUI 自动化、真实 Keychain 正向写入、真实 MCP 配置写入、并发/中断、Windows/Linux、部分 adapter 路径与 symlink 行为。
 - **已知限制**：静态审计是启发式规则非完备证明；MCP/凭据静态 unknown；封闭 Agent 只能人工证据且证据为用户输入；版本探测依赖 app bundle/CLI；插件只读、不试连 MCP；备份恢复未实现；MCP headers 明文；详见 §8、[VALIDATION.md](VALIDATION.md) 与 [SECURITY.md](SECURITY.md)。

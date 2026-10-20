@@ -8,7 +8,7 @@
 ## 0. 结论摘要
 
 1. Adapter 是**只读描述层**：只回答「检测信号、skill 根、安装根、MCP 目标、项目根、插件发现、symlink/插件支持」，不执行写入（`adapters/mod.rs:1-8`）。
-2. 9 个内置适配器：Codex、ChatGPT、TRAE (International)、TRAE CN、ZCode、WorkBuddy、DSH、Claude Code、Cursor（`builtin.rs:22-34`）。
+2. **11 个内置适配器**：Codex、ChatGPT、TRAE (International)、TRAE CN、ZCode、WorkBuddy、DSH、Claude Code、Cursor、Qwen Work（千问工作）、Doubao Work（豆包工作）（`builtin.rs:22-35`）。
 3. **真正具备可用安装根**的只有：Codex、TRAE、TRAE CN、ZCode、WorkBuddy、DSH；ChatGPT 明确 `Unsupported`；Claude Code / Cursor 为 `VerificationRequired`（安装路径存在但未验证）。
 4. 写入统一由 `ops`/`mcp` 完成；adapter 不碰文件。因此「新增 Agent」= 实现 trait + 注册 + 补证据 + 补测试，不需要改执行器。
 5. **已验证实现**：DSH 的 `symlink_support` 已按本机证据改为 `Supported`（`builtin.rs:725-729`），因此 DSH 目标使用 symlink 时不会再被降级为 copy。
@@ -125,7 +125,7 @@ resolved_mcp_targets(home):
 
 ---
 
-## 3. 当前 9 个适配器矩阵（代码事实）
+## 3. 当前 11 个适配器矩阵（代码事实）
 
 > 「安装根」一列决定 `plan_install` 的落点；「MCP 目标」一列决定能否分发 MCP；「symlink」列是代码声明值，不是实测值。
 
@@ -142,6 +142,8 @@ resolved_mcp_targets(home):
 | 7 | `dsh` / `builtin.dsh` | DeepSeek Harness | `~/.dsh` 或 `/Applications/DeepSeek Harness.app` | `~/.dsh/skills`、`~/.agents/skills` | `~/.dsh/skills` | **无**（DSH MCP 是 Cordis YAML，未实现 codec） | **Supported** | DiscoveryOnly | [§3.7](AGENT-COMPATIBILITY.md)、[dsh evidence](compat-evidence/dsh/README.md) |
 | 8 | `claude-code` / `builtin.claude-code` | Claude Code | `~/.claude` 或 `~/.claude.json` → 状态恒 `VerificationRequired` | `~/.claude/skills` | 默认同 skill roots | 全局 `~/.claude.json`（`json:mcpServers`，stdio/http）；项目 `<project>/.claude/skills` | Unverified | DiscoveryOnly | [§3.8](AGENT-COMPATIBILITY.md) |
 | 9 | `cursor` / `builtin.cursor` | Cursor | `~/.cursor` 或 `/Applications/Cursor.app` → 状态恒 `VerificationRequired` | `~/.cursor/skills` | 默认同 skill roots | 全局 `~/.cursor/mcp.json`（`json:mcpServers`，stdio/http） | Unverified | Unverified | [REFERENCE-STUDY §3.7](REFERENCE-STUDY.md)（无本机证据） |
+| 10 | `qwen-work` / `builtin.qwen-work` | Qwen Work (千问工作) | `/Applications/QwenWorkCN.app`（也支持 Qwen Work.app/QwenWork.app）或 `~/.qwenworkcn` | `~/.qwenworkcn/skills`（本机 VERIFIED，31 个技能） | `~/.qwenworkcn/skills` | 全局 `~/.qwenworkcn/mcp.json`（`json:mcpServers`，stdio/http/streamable_http；app.asar 常量 + fixture 验证） | Unverified（VR） | FileManaged（只读发现 `plugins`/`plugins-custom`） | [§3.9](AGENT-COMPATIBILITY.md)、`tests/adapters_extended.rs` |
+| 11 | `doubao-work` / `builtin.doubao-work` | Doubao Work (豆包工作) | 候选 `.app` 名 + `~/Library/Application Support/Doubao|豆包`、`~/.doubao` → 本机 NOT_INSTALLED | **无全局根**；项目 `.user_skills`/`.doubao/skills`（仅注册 custom root 后可分发） | 无（未注册时 plan blocked） | **无**（UI manual-only，不写本地文件） | Unverified（VR） | ManualOnly | [§3.10](AGENT-COMPATIBILITY.md)、`tests/adapters_extended.rs` |
 
 ### 3.2 项目级路径
 
@@ -156,6 +158,8 @@ resolved_mcp_targets(home):
 | DSH | `<project>/.dsh/skills`、`<project>/.agents/skills` | 无 |
 | Claude Code | `<project>/.claude/skills` | 无 |
 | Cursor | 无 | 无 |
+| Qwen Work | 无（代码未声明） | 无 |
+| Doubao Work | `<project>/.user_skills`、`<project>/.doubao/skills`（扫描；需注册 custom root 才可安装） | 无 |
 
 > Codex 未声明 `<project>/.codex/skills` 与项目 MCP，原因是本机证据只到「全局根 VERIFIED、项目根 VR」（AGENT-COMPATIBILITY §2.1）。这是「证据不足就不声明」的示例。
 
@@ -188,6 +192,8 @@ resolved_mcp_targets(home):
 | ZCode | `3.16.2` | app bundle |
 | TRAE (International) | 无 | 仅配置残留 |
 | Claude Code / Cursor | 无 | 无版本来源 |
+| Qwen Work | `1.3.1` | `/Applications/QwenWorkCN.app`；本机真实 |
+| Doubao Work | 无 | 本机未安装 |
 
 **与验证状态的关系**：Agent 版本变化本身不改变 `HealthState`，但会提示重新扫描/重新记录验证证据；人工证据按 **capability version + agent** 绑定，Agent 升级后需重新验证。封闭 Agent 无法自动 E2E，只能用 manual evidence（`kind=manual, status=passed`）。
 
@@ -323,9 +329,9 @@ resolved_mcp_targets(home):
 
 ## 8.5 状态标记（已验证 / 未验证 / 已知限制）
 
-- **已验证**：trait 契约与执行分离；9 个 adapter 的 id/key/roots/格式由代码定义；Codex/WorkBuddy 的发现与 MCP 写入路径有集成测试；DSH symlink 声明已与证据一致；真实 Mac 验收覆盖 Codex/ZCode 分发与扫描；Agent Health 真实读出 6 个 Agent 版本。
-- **未验证**：Codex 项目级根、Trae CN 项目根、ZCode 远程传输/原生项目配置、WorkBuddy `staticHeaders`、Claude/Cursor 实际安装、非 DSH symlink 行为；TRAE 国际/Claude/Cursor 无版本来源。
-- **已知限制**：代码不调用任何 Agent 管理 CLI（无 native 管理；只执行版本 `--version`）；ChatGPT 只读；同名 app 未按 CFBundleName 区分；MCP 删除留空表；见 §8。
+- **已验证**：trait 契约与执行分离；**11 个 adapter** 的 id/key/roots/格式由代码定义；Codex/WorkBuddy/Qwen 的发现与 MCP 写入路径有集成测试；DSH symlink 声明已与证据一致；真实 Mac 验收覆盖 Codex/ZCode 分发与扫描；Agent Health 真实读出 7 个 Agent 版本（含 Qwen Work 1.3.1）。
+- **未验证**：Codex 项目级根、Trae CN 项目根、ZCode 远程传输/原生项目配置、WorkBuddy `staticHeaders`、Claude/Cursor 实际安装、非 DSH symlink 行为；TRAE 国际/Claude/Cursor/Doubao 无版本来源或未安装；Qwen symlink/热加载/MCP 生效方式 VR。
+- **已知限制**：代码不调用任何 Agent 管理 CLI（无 native 管理；只执行版本 `--version`）；ChatGPT 只读；Doubao MCP/插件 manual-only；同名 app 未按 CFBundleName 区分；MCP 删除留空表；见 §8。
 
 ## 9. 交叉链接
 
