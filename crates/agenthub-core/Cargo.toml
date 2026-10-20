@@ -1,0 +1,30 @@
+[package]
+name = "agenthub-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "AgentHub core engine: capability registry, agent adapters, transactional distribution"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+sha2.workspace = true
+hex.workspace = true
+walkdir.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+toml_edit.workspace = true
+dirs.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+fs2.workspace = true
+libc.workspace = true
+rusqlite.workspace = true
+zip.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

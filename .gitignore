@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+.pnpm-cache/
+target/
+
+# Frontend build output
+dist/
+dist-ssr/
+*.local
+
+# Tauri generated
+src-tauri/gen/
+src-tauri/target/
+
+# AgentHub local data (never commit user capability data)
+.agenthub/
+*.db
+*.db-shm
+*.db-wal
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.log
+coverage/
+.tmp-test/
