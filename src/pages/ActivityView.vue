@@ -12,6 +12,7 @@ import LoadingState from '../components/LoadingState.vue'
 import OperationResultView from '../components/OperationResultView.vue'
 import PageHeader from '../components/PageHeader.vue'
 import PlanPreview from '../components/PlanPreview.vue'
+import RecoveryReportView from '../components/RecoveryReportView.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import { normalizeError } from '../lib/api'
 import { formatBytes, formatDateTime, formatRelativeTime } from '../lib/format'
@@ -24,7 +25,8 @@ import {
   toneForOperationStatus,
   installationStateKey,
 } from '../lib/status'
-import type { OperationView } from '../lib/types'
+import { canRecoverOperation, hasManualRecovery } from '../lib/v31'
+import type { OperationView, RecoveryReport } from '../lib/types'
 import { useAppStore } from '../stores/app'
 import { useOperationsStore } from '../stores/operations'
 import { useSkillsStore } from '../stores/skills'
@@ -52,6 +54,12 @@ const rollbackTarget = ref<OperationView | null>(null)
 const rollingBack = ref(false)
 const rollbackError = ref<string | null>(null)
 const backupBusy = ref(false)
+
+// v3.1 recovery: only ever started by an explicit user click.
+const recoverTarget = ref<OperationView | null>(null)
+const recovering = ref(false)
+const recoverError = ref<string | null>(null)
+const recoverReport = ref<RecoveryReport | null>(null)
 
 const tabItems = computed<Array<{ key: Tab; label: string }>>(() => [
   { key: 'operations', label: t('activity.tabs.operations') },
@@ -151,8 +159,49 @@ async function confirmRollback(): Promise<void> {
   }
 }
 
-async function refreshSnapshots(): Promise<void> {
+async function confirmRecover(): Promise<void> {
+  const operation = recoverTarget.value
+  if (!operation) return
+  recovering.value = true
+  recoverError.value = null
+  recoverReport.value = null
   try {
+    const report = await store.recover(operation.id)
+    recoverReport.value = report
+    recoverTarget.value = null
+    if (hasManualRecovery(report)) {
+      ui.notify('warning', t('activity.recoverDone'), {
+        detail: t('activity.recoverManualNotice'),
+      })
+    } else {
+      ui.notify('success', t('activity.recoverDone'))
+    }
+    await Promise.allSettled([
+      skillsStore.refresh(),
+      app.refreshAgents(),
+      app.loadDashboard(true),
+    ])
+    if (detailId.value) await openDetail(detailId.value)
+    if (tab.value === 'snapshots') await store.loadSnapshots().catch(() => undefined)
+  } catch (err) {
+    recoverTarget.value = null
+    recoverError.value = normalizeError(err, t('errors.recoverFailed'))
+    ui.notifyError(t('errors.recoverFailed'), recoverError.value)
+  } finally {
+    recovering.value = false
+  }
+}
+
+function closeRecoverReport(): void {
+  recoverReport.value = null
+}
+
+function backToOperations(): void {
+  recoverReport.value = null
+  tab.value = 'operations'
+}
+
+async function refreshSnapshots(): Promise<void> {  try {
     await store.loadSnapshots()
   } catch (err) {
     ui.notifyError(t('errors.loadFailed'), normalizeError(err))
@@ -242,6 +291,7 @@ function doctorTone(ok: boolean): 'success' | 'warn' {
 
     <div class="section-stack">
       <ErrorBanner v-if="rollbackError" :message="rollbackError" :title="t('errors.rollbackFailed')" />
+      <ErrorBanner v-if="recoverError" :message="recoverError" :title="t('errors.recoverFailed')" />
 
       <!-- Operations -->
       <template v-if="tab === 'operations'">
@@ -333,6 +383,16 @@ function doctorTone(ok: boolean): 'success' | 'warn' {
                         >
                           <Icon name="rollback" :size="11" />
                           {{ t('activity.rollback') }}
+                        </button>
+                        <button
+                          v-if="canRecoverOperation(operation.status)"
+                          type="button"
+                          class="btn btn-sm"
+                          :title="t('activity.recoverHint')"
+                          @click.stop="recoverTarget = operation"
+                        >
+                          <Icon name="shield" :size="11" />
+                          {{ t('activity.recover') }}
                         </button>
                       </div>
                     </td>
@@ -699,6 +759,21 @@ function doctorTone(ok: boolean): 'success' | 'warn' {
           </div>
         </div>
 
+        <div
+          v-if="
+            selected.status === 'needs_manual_recovery' ||
+            selected.recoveryState === 'needs_manual_recovery'
+          "
+          class="notice notice-warn"
+          role="alert"
+        >
+          <Icon class="notice-icon" name="alert-triangle" :size="14" />
+          <div class="notice-body">
+            <p class="notice-title">{{ t('activity.recoverManualNotice') }}</p>
+            <p class="hint">{{ t('activity.recoverManualHint') }}</p>
+          </div>
+        </div>
+
         <section>
           <p class="section-title">{{ t('activity.plan') }}</p>
           <PlanPreview v-if="selected.plan" :plan="selected.plan" />
@@ -736,6 +811,16 @@ function doctorTone(ok: boolean): 'success' | 'warn' {
           <Icon name="rollback" :size="13" />
           {{ t('activity.rollback') }}
         </button>
+        <button
+          v-if="selected && canRecoverOperation(selected.status)"
+          type="button"
+          class="btn"
+          :title="t('activity.recoverHint')"
+          @click="recoverTarget = selected"
+        >
+          <Icon name="shield" :size="13" />
+          {{ t('activity.recover') }}
+        </button>
       </template>
     </BaseModal>
 
@@ -749,5 +834,34 @@ function doctorTone(ok: boolean): 'success' | 'warn' {
       @cancel="rollbackTarget = null"
       @confirm="confirmRollback"
     />
+
+    <ConfirmDialog
+      v-if="recoverTarget"
+      :title="t('activity.recoverTitle')"
+      :message="t('activity.recoverBody', { id: recoverTarget.id })"
+      :confirm-label="t('activity.recoverConfirm')"
+      :busy="recovering"
+      @cancel="recoverTarget = null"
+      @confirm="confirmRecover"
+    />
+
+    <BaseModal
+      v-if="recoverReport"
+      :title="t('activity.recoverResultTitle')"
+      :subtitle="t('activity.recoverHint')"
+      size="lg"
+      @close="closeRecoverReport"
+    >
+      <RecoveryReportView :report="recoverReport" />
+      <template #footer>
+        <button type="button" class="btn" @click="closeRecoverReport">
+          {{ t('common.close') }}
+        </button>
+        <button type="button" class="btn" @click="backToOperations">
+          <Icon name="activity" :size="13" />
+          {{ t('activity.tabs.operations') }}
+        </button>
+      </template>
+    </BaseModal>
   </div>
 </template>

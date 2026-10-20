@@ -1,10 +1,13 @@
 import { invoke, isTauri } from '@tauri-apps/api/core'
 
+import { ApiEnvelopeError, ApiEnvelopeFormatError, unwrapApiResult } from './envelope'
 import type {
   AgentHealthReport,
+  AgentInspection,
   AgentPathUpdate,
   AgentView,
   AppSettings,
+  ApprovalGrant,
   AuditRequest,
   BackupResult,
   BackupView,
@@ -21,6 +24,7 @@ import type {
   ImportRequest,
   ImportResult,
   InstallRequest,
+  IntegrityReport,
   McpDistributeRequest,
   McpImportRequest,
   McpServerView,
@@ -31,6 +35,7 @@ import type {
   PluginRecordView,
   ProfileUpsertRequest,
   ProfileView,
+  RecoveryReport,
   ScanImportRequest,
   ScanImportResult,
   ScanReport,
@@ -45,16 +50,36 @@ import type {
   ValidationRun,
 } from './types'
 
+/** Extra structured metadata carried by a failed envelope. */
+export interface ApiErrorMeta {
+  retryable?: boolean
+  requestId?: string | null
+  details?: unknown
+}
+
 /** Error raised by the Tauri bridge, normalized to a readable message. */
 export class ApiError extends Error {
   readonly code: string | null
   readonly raw: unknown
+  /** `true` when the backend marked the same request as safe to retry. */
+  readonly retryable: boolean
+  /** Server-side trace id from the unified ApiResult envelope. */
+  readonly requestId: string | null
+  readonly details: unknown
 
-  constructor(message: string, code: string | null = null, raw: unknown = null) {
+  constructor(
+    message: string,
+    code: string | null = null,
+    raw: unknown = null,
+    meta: ApiErrorMeta = {},
+  ) {
     super(message)
     this.name = 'ApiError'
     this.code = code
     this.raw = raw
+    this.retryable = meta.retryable ?? false
+    this.requestId = meta.requestId ?? null
+    this.details = meta.details
   }
 }
 
@@ -88,6 +113,16 @@ export function normalizeError(error: unknown, fallback = '未知错误'): strin
 
 export function toApiError(error: unknown, fallback?: string): ApiError {
   if (error instanceof ApiError) return error
+  if (error instanceof ApiEnvelopeError) {
+    return new ApiError(error.message, error.code, error, {
+      retryable: error.retryable,
+      requestId: error.requestId,
+      details: error.details,
+    })
+  }
+  if (error instanceof ApiEnvelopeFormatError) {
+    return new ApiError(error.message, 'INVALID_RESPONSE', error)
+  }
   const raw = error && typeof error === 'object' ? (error as Record<string, unknown>) : null
   const code = raw && typeof raw.code === 'string' ? raw.code : null
   return new ApiError(normalizeError(error, fallback), code, error)
@@ -107,6 +142,23 @@ async function call<T>(command: string, args?: Record<string, unknown>): Promise
   }
   try {
     return await invoke<T>(command, args)
+  } catch (error) {
+    throw toApiError(error)
+  }
+}
+
+/**
+ * Call a v3.1 command that returns the unified `ApiResult<T>` envelope.
+ * Success unwraps `data`; failure throws a structured `ApiError` whose `code`,
+ * `retryable`, `requestId` and `details` come from the backend error payload.
+ */
+async function callApi<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  if (!isDesktop()) {
+    throw new ApiError(NOT_TAURI_MESSAGE, 'not_tauri')
+  }
+  try {
+    const raw = await invoke<unknown>(command, args)
+    return unwrapApiResult<T>(raw)
   } catch (error) {
     throw toApiError(error)
   }
@@ -168,6 +220,31 @@ export const api = {
     call<OperationView[]>('operations_list', { limit: limit ?? null }),
   operationGet: (operationId: string) =>
     call<OperationView>('operations_get', { operation_id: operationId }),
+
+  // v3.1 approval / recovery / evidence (unified ApiResult envelope)
+  operationsPreview: (operationId: string) =>
+    callApi<OperationView>('operations_preview', { operation_id: operationId }),
+  operationsApprove: (operationId: string, planHash: string) =>
+    callApi<ApprovalGrant>('operations_approve', {
+      operation_id: operationId,
+      plan_hash: planHash,
+    }),
+  /** The approval token is a bearer credential: pass it straight through. */
+  operationsApplyApproved: (
+    operationId: string,
+    approvalToken: string,
+    idempotencyKey?: string,
+  ) =>
+    callApi<OperationResult>('operations_apply_approved', {
+      operation_id: operationId,
+      approval_token: approvalToken,
+      idempotency_key: idempotencyKey ?? null,
+    }),
+  operationsRecover: (operationId: string) =>
+    callApi<RecoveryReport>('operations_recover', { operation_id: operationId }),
+  agentsInspect: (agentId: string) =>
+    callApi<AgentInspection>('agents_inspect', { agent_id: agentId }),
+  appIntegrity: () => callApi<IntegrityReport>('app_integrity'),
   snapshotsList: (operationId?: string, limit?: number) =>
     call<SnapshotView[]>('snapshots_list', {
       operation_id: operationId ?? null,

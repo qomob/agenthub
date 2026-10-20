@@ -52,6 +52,8 @@ export const operationStatusKey: Record<OperationStatus, string> = {
   partial: 'status.operation.partial',
   failed: 'status.operation.failed',
   rolled_back: 'status.operation.rolled_back',
+  needs_manual_recovery: 'status.operation.needs_manual_recovery',
+  recovered: 'status.operation.recovered',
 }
 
 export const operationKindKey: Record<OperationKind, string> = {
@@ -146,6 +148,8 @@ const operationStatusTone: Record<string, Tone> = {
   partial: 'warn',
   failed: 'danger',
   rolled_back: 'neutral',
+  needs_manual_recovery: 'danger',
+  recovered: 'success',
 }
 
 const pluginSupportTone: Record<string, Tone> = {

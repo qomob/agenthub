@@ -53,7 +53,7 @@ fn fresh_home_initialises_library_profiles_and_migrations() {
         .conn()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .expect("read user_version");
-    assert_eq!(schema_version, 2);
+    assert_eq!(schema_version, 3);
 
     drop(hub);
 
@@ -66,7 +66,7 @@ fn fresh_home_initialises_library_profiles_and_migrations() {
         .conn()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .expect("read user_version");
-    assert_eq!(schema_version, 2, "migrations must be idempotent");
+    assert_eq!(schema_version, 3, "migrations must be idempotent");
 }
 
 #[test]

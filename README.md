@@ -2,6 +2,8 @@
 
 > **本机 Agent 能力控制中心**：集中登记散落在 Codex、TRAE、ZCode、WorkBuddy、DeepSeek Harness、Qwen Work、Doubao Work 等 Agent 目录里的 **Skills / MCP / 插件清单**，通过适配器事务化分发，并用 **静态审计 + 依赖诊断 + 更新影响 + 人工验证证据 + Agent 版本健康** 回答「装没装、能不能用、安不安全、更新后会不会坏」。
 >
+> **v3.1 Phase 1 安全切片（2026-10-20 18:45）**：新增 **plan_hash → 一次性 approval token（15 分钟过期）→ apply → CAS → journal → recover** 安全链路、`operation_steps` 持久日志、`adapter_evidence` 证据分级、迁移前自动备份，以及 `operations preview/approve/apply/recover`、`agents inspect` IPC/CLI 与两步审批 UI。测试 **113 Rust + 55 前端**全部通过；真实库副本 v2→v3 迁移 111 个能力完整保留；隔离双宿主分发/回滚/外部修改保护验收通过。真实 Agent 写入仍未授权、未执行。详见 [docs/handoffs/LATEST.md](docs/handoffs/LATEST.md)、[docs/evidence/phase1/](docs/evidence/phase1/)。
+>
 > 状态快照：**2026-10-20 17:37（Asia/Shanghai）**。**0.4.0 技能库可见性修复已落地**：Skills 页新增「中央库 / 扫描发现」，支持跨 Agent 去重、批量导入中央库与 `skills adopt`；真实机器重新扫描 396 候选 → 跳过只读 273、重复 11、导入 **112** 个（55 MB、失败 0），中央库能力数从 2 → **111**。此前适配器扩展（Qwen Work / Doubao Work，总数 11）与 Validation Platform 仍在。测试：core **82**（44 unit + 38 integration，含 scan_adopt 2）+ CLI **16** = **98 个 Rust 测试**，前端 **8 files / 38 tests**，全部通过。代码版本 **0.4.0**；**0.4.0 `.app` 与 `.dmg` 已构建并覆盖安装 `/Applications`**（17:36–17:37）；签名/公证未做。详见 [docs/VALIDATION.md](docs/VALIDATION.md)、[docs/ACCEPTANCE-REPORT.md](docs/ACCEPTANCE-REPORT.md)、[已知限制](#已知限制)。
 
 AgentHub 是 **本地优先** 的 macOS 桌面应用（Tauri 2 + Vue 3 + Rust + SQLite），无账号、无云端、无遥测。GUI 与 CLI 共用同一个 `agenthub-core` 引擎。

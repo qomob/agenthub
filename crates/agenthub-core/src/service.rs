@@ -11,7 +11,9 @@ use crate::db::{AgentRow, Database, InstallationRow, McpRow, ProfileRow};
 use crate::error::{Error, Result};
 use crate::library::{self, Library};
 use crate::model::*;
-use crate::ops::{current_target_hash, Executor};
+use crate::ops::{
+    approval_expiry_from_now, current_target_hash, plan_digest, Executor, APPROVAL_TTL_MINUTES,
+};
 use crate::scan;
 use crate::skill::{self, StagingDir};
 use crate::util;
@@ -164,8 +166,126 @@ impl AgentHub {
                 updated_at: now,
             };
             self.db.upsert_agent(&record)?;
+            self.seed_agent_evidence(&*adapter, &record, detection.status)?;
         }
         Ok(())
+    }
+
+    /// Record conservative per-feature evidence for an agent. Read-side facts
+    /// observed on this machine become `verified_config`; every write/execute
+    /// feature starts as `unverified` until an authorized real-host test
+    /// produces runtime evidence. This is the Phase 0/1 evidence baseline.
+    fn seed_agent_evidence(
+        &self,
+        adapter: &dyn AgentAdapter,
+        record: &AgentRecord,
+        status: AgentStatus,
+    ) -> Result<()> {
+        let installed = matches!(
+            status,
+            AgentStatus::Installed | AgentStatus::VerificationRequired
+        );
+        let skill_roots = adapter.skill_roots(&self.config.home);
+        let roots_exist = skill_roots.iter().any(|path| path.is_dir());
+        let mcp_targets = adapter.mcp_target_specs(&self.config.home);
+        let mcp_exist = mcp_targets.iter().any(|target| target.path.exists());
+        let plugin_manageable = matches!(
+            adapter.plugin_support(),
+            PluginSupport::NativeManaged | PluginSupport::FileManaged
+        );
+        let feature = |feature_key: &str,
+                       support_state: &str,
+                       evidence_level: &str,
+                       notes: String| {
+            crate::db::AdapterEvidenceRow {
+                id: util::new_id(),
+                agent_key: record.key.clone(),
+                feature_key: feature_key.to_string(),
+                support_state: support_state.to_string(),
+                evidence_level: evidence_level.to_string(),
+                source_url: Some("docs/evidence/phase0/agents/07_FEATURE_PROBES.md".to_string()),
+                tested_at: Some(util::now()),
+                agent_version: None,
+                adapter_version: crate::adapters::suite_version().to_string(),
+                notes: Some(notes),
+            }
+        };
+        let mut rows = Vec::new();
+        rows.push(feature(
+            "detect",
+            if installed { "verified_config" } else { "unverified" },
+            if installed { "verified_config" } else { "unverified" },
+            format!("detection status: {:?}", status),
+        ));
+        rows.push(feature(
+            "read_skills",
+            if roots_exist { "verified_config" } else { "unverified" },
+            if roots_exist { "verified_config" } else { "unverified" },
+            format!("{} candidate skill root(s)", skill_roots.len()),
+        ));
+        rows.push(feature(
+            "read_mcp",
+            if mcp_exist { "verified_config" } else { "unverified" },
+            if mcp_exist { "verified_config" } else { "unverified" },
+            format!("{} candidate MCP target(s)", mcp_targets.len()),
+        ));
+        rows.push(feature(
+            "read_plugins",
+            if plugin_manageable { "verified_config" } else { "unverified" },
+            if plugin_manageable { "verified_config" } else { "unverified" },
+            format!("plugin support: {:?}", adapter.plugin_support()),
+        ));
+        for key in [
+            "write_skills",
+            "write_mcp",
+            "read_rules",
+            "write_rules",
+            "model_config",
+            "manage_plugins",
+            "execute",
+            "observe_usage",
+            "hot_reload",
+        ] {
+            rows.push(feature(key, "unverified", "unverified", "not verified on this machine".to_string()));
+        }
+        for row in rows {
+            self.db.upsert_adapter_evidence(&row)?;
+        }
+        Ok(())
+    }
+
+    /// Per-feature capability evidence for one agent instance.
+    pub fn agent_inspect(&self, agent_id: &str) -> Result<AgentInspection> {
+        let row = self
+            .db
+            .get_agent(agent_id)?
+            .ok_or_else(|| Error::not_found(format!("agent {agent_id} does not exist")))?;
+        let capabilities = self.db.list_adapter_evidence(&row.key)?;
+        Ok(AgentInspection {
+            agent_id: row.id.clone(),
+            agent_key: row.key.clone(),
+            capabilities,
+            inspected_at: util::now(),
+        })
+    }
+
+    pub fn list_operation_steps(&self, operation_id: &str) -> Result<Vec<OperationStepView>> {
+        self.db.list_operation_steps(operation_id)
+    }
+
+    pub fn integrity_report(&self) -> Result<IntegrityReport> {
+        self.db.integrity_check()
+    }
+
+    /// Recover a failed/partial operation by restoring only journals whose
+    /// current content still matches what this operation wrote.
+    pub fn recover_operation(&self, operation_id: &str) -> Result<RecoveryReport> {
+        let _guard = self.write_lock.lock().map_err(|_| Error::msg("lock poisoned"))?;
+        let executor = Executor {
+            db: &self.db,
+            library: &self.library()?,
+        };
+        executor.recover(operation_id)
     }
 
     pub fn list_agents(&self) -> Result<Vec<AgentView>> {
@@ -820,6 +940,9 @@ impl AgentHub {
                 blocked: 0,
             },
             created_at: util::now(),
+            plan_hash: String::new(),
+            expires_at: String::new(),
+            approval_state: "none".to_string(),
         };
         self.db.insert_operation(
             &operation_id,
@@ -1451,6 +1574,9 @@ impl AgentHub {
     ) -> Result<OperationPlan> {
         let operation_id = util::new_id();
         let summary_counts = plan_summary(&items);
+        let plan_created_at = util::now();
+        let plan_expires_at = approval_expiry_from_now(APPROVAL_TTL_MINUTES);
+        let plan_hash = plan_digest(&kind, &items);
         let plan = OperationPlan {
             operation_id: operation_id.clone(),
             kind,
@@ -1460,7 +1586,10 @@ impl AgentHub {
             requires_restart_agents: restarts,
             requires_confirmation: summary_counts.conflict > 0 || force,
             summary: summary_counts,
-            created_at: util::now(),
+            created_at: plan_created_at,
+            plan_hash: plan_hash.clone(),
+            expires_at: plan_expires_at.clone(),
+            approval_state: "none".to_string(),
         };
         self.db.insert_operation(
             &operation_id,
@@ -1470,6 +1599,8 @@ impl AgentHub {
             &serde_json::to_string(&plan)?,
             None,
         )?;
+        self.db
+            .set_operation_plan_meta(&operation_id, &plan_hash, &plan_expires_at)?;
         Ok(plan)
     }
 
@@ -1513,6 +1644,18 @@ impl AgentHub {
                             | OperationStatus::Running
                     )
             });
+        let approval_state = if row.approval_state == "approved"
+            && row
+                .approval_expires_at
+                .as_deref()
+                .map(crate::ops::approval_is_expired)
+                .unwrap_or(false)
+        {
+            "expired".to_string()
+        } else {
+            row.approval_state.clone()
+        };
+        let steps = self.db.list_operation_steps(&row.id)?;
         Ok(OperationView {
             id: row.id.clone(),
             kind: OperationKind::parse(&row.kind),
@@ -1535,11 +1678,180 @@ impl AgentHub {
                         | OperationKind::Import
                         | OperationKind::Scan
                 ),
+            plan_hash: row.plan_hash.clone(),
+            expires_at: row.approval_expires_at.clone(),
+            approval_state,
+            approved_at: row.approved_at.clone(),
+            recovery_state: row.recovery_state.clone(),
+            steps,
             plan,
             result,
         })
     }
 
+    /// Read-only preview of the approval state, plan hash and journal.
+    pub fn preview_operation(&self, operation_id: &str) -> Result<OperationView> {
+        self.get_operation(operation_id)
+    }
+
+    /// Issue a one-time approval token bound to `expected_plan_hash`.
+    ///
+    /// The token itself is returned to the caller exactly once; the database
+    /// stores only its SHA-256. A changed plan or an expired deadline forces a
+    /// new approval.
+    pub fn approve_operation(
+        &self,
+        operation_id: &str,
+        expected_plan_hash: &str,
+    ) -> Result<ApprovalGrant> {
+        let _guard = self.write_lock.lock().map_err(|_| Error::msg("lock poisoned"))?;
+        let row = self
+            .db
+            .get_operation(operation_id)?
+            .ok_or_else(|| Error::not_found("operation does not exist"))?;
+        let status = OperationStatus::parse(&row.status);
+        if status != OperationStatus::Planned {
+            return Err(Error::conflict(format!(
+                "operation is in state '{}' and cannot be approved",
+                row.status
+            )));
+        }
+        let plan: OperationPlan = serde_json::from_str(&row.plan)
+            .map_err(|err| Error::msg(format!("operation plan is unreadable: {err}")))?;
+        let current_hash = plan_digest(&plan.kind, &plan.items);
+        let stored_hash = row
+            .plan_hash
+            .clone()
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| current_hash.clone());
+        if expected_plan_hash != stored_hash || stored_hash != current_hash {
+            return Err(Error::ExternalModification(
+                "plan hash changed; re-preview the operation and approve again".to_string(),
+            ));
+        }
+        let expires_at = approval_expiry_from_now(APPROVAL_TTL_MINUTES);
+        let token = crate::ops::new_approval_token();
+        let token_hash = crate::ops::approval_token_hash(&token);
+        let approved_at = util::now();
+        self.db.set_operation_approval(
+            operation_id,
+            &token_hash,
+            "local-user",
+            &approved_at,
+            &expires_at,
+        )?;
+        self.db.insert_audit_event(
+            "local-user",
+            "operation.approved",
+            Some(operation_id),
+            &serde_json::json!({
+                "planHash": stored_hash,
+                "expiresAt": expires_at,
+            }),
+        )?;
+        Ok(ApprovalGrant {
+            operation_id: operation_id.to_string(),
+            plan_hash: stored_hash,
+            approval_token: token,
+            approved_at,
+            expires_at,
+        })
+    }
+
+    /// Apply an approved operation. Verifies the bearer token, deadline, plan
+    /// hash and (in the executor) the on-disk CAS hashes before writing.
+    pub fn apply_operation_approved(
+        &self,
+        operation_id: &str,
+        approval_token: &str,
+        idempotency_key: Option<&str>,
+    ) -> Result<OperationResult> {
+        let _guard = self.write_lock.lock().map_err(|_| Error::msg("lock poisoned"))?;
+        self.apply_operation_approved_locked(operation_id, approval_token, idempotency_key, false)
+    }
+
+    fn apply_operation_approved_locked(
+        &self,
+        operation_id: &str,
+        approval_token: &str,
+        idempotency_key: Option<&str>,
+        force: bool,
+    ) -> Result<OperationResult> {
+        let row = self
+            .db
+            .get_operation(operation_id)?
+            .ok_or_else(|| Error::not_found("operation does not exist"))?;
+        let status = OperationStatus::parse(&row.status);
+        if let Some(key) = idempotency_key {
+            if let Some(existing) = self.db.find_operation_by_idempotency(key)? {
+                if existing.id == operation_id {
+                    let result: OperationResult = serde_json::from_str(&existing.result)
+                        .map_err(|err| Error::msg(format!("stored result is unreadable: {err}")))?;
+                    if matches!(
+                        result.status,
+                        OperationStatus::Success | OperationStatus::Partial
+                    ) {
+                        return Ok(result);
+                    }
+                } else {
+                    return Err(Error::conflict(
+                        "idempotency key is already used by another operation",
+                    ));
+                }
+            }
+        }
+        if !matches!(
+            status,
+            OperationStatus::Planned | OperationStatus::Running
+        ) {
+            return Err(Error::conflict(format!(
+                "operation is in state '{}' and cannot be applied",
+                row.status
+            )));
+        }
+        let plan: OperationPlan = serde_json::from_str(&row.plan)
+            .map_err(|err| Error::msg(format!("operation plan is unreadable: {err}")))?;
+        let current_hash = plan_digest(&plan.kind, &plan.items);
+        if row.plan_hash.as_deref().unwrap_or("") != current_hash {
+            return Err(Error::ExternalModification(
+                "plan content changed since it was persisted; re-preview required".to_string(),
+            ));
+        }
+        let stored_token_hash = row.approval_token_hash.as_deref().unwrap_or("");
+        if stored_token_hash.is_empty() {
+            return Err(Error::conflict(
+                "operation has no approval; call operations_approve first",
+            ));
+        }
+        let presented = crate::ops::approval_token_hash(approval_token);
+        if !constant_time_eq(stored_token_hash.as_bytes(), presented.as_bytes()) {
+            return Err(Error::Blocked(
+                "approval token does not match this operation".to_string(),
+            ));
+        }
+        let expires_at = row.approval_expires_at.as_deref().unwrap_or("");
+        if crate::ops::approval_is_expired(expires_at) {
+            return Err(Error::conflict(
+                "approval expired; request a new approval token",
+            ));
+        }
+        self.db.set_operation_state(
+            operation_id,
+            "running",
+            None,
+            idempotency_key,
+        )?;
+        let executor = Executor {
+            db: &self.db,
+            library: &self.library()?,
+        };
+        executor.apply(&plan, force)
+    }
+
+    /// Legacy/trusted entry point used by the existing CLI `--yes` flow and by
+    /// tests. It still records an explicit approval bound to the plan hash so
+    /// every external write remains auditable; new callers should use
+    /// `approve_operation` + `apply_operation_approved`.
     pub fn apply_operation(&self, operation_id: &str, force: bool) -> Result<OperationResult> {
         let _guard = self.write_lock.lock().map_err(|_| Error::msg("lock poisoned"))?;
         let row = self
@@ -1554,11 +1866,25 @@ impl AgentHub {
             )));
         }
         let plan: OperationPlan = serde_json::from_str(&row.plan)?;
-        let executor = Executor {
-            db: &self.db,
-            library: &self.library()?,
-        };
-        executor.apply(&plan, force)
+        let plan_hash = plan_digest(&plan.kind, &plan.items);
+        let token = crate::ops::new_approval_token();
+        let expires_at = approval_expiry_from_now(APPROVAL_TTL_MINUTES);
+        self.db.set_operation_approval(
+            operation_id,
+            &crate::ops::approval_token_hash(&token),
+            if force { "local-user(force)" } else { "local-user(yes)" },
+            &util::now(),
+            &expires_at,
+        )?;
+        self.db
+            .set_operation_plan_meta(operation_id, &plan_hash, &expires_at)?;
+        self.db.insert_audit_event(
+            "local-user",
+            "operation.auto_approved",
+            Some(operation_id),
+            &serde_json::json!({ "planHash": plan_hash, "force": force }),
+        )?;
+        self.apply_operation_approved_locked(operation_id, &token, None, force)
     }
 
     pub fn rollback_operation(&self, operation_id: &str) -> Result<OperationResult> {
@@ -2814,3 +3140,15 @@ pub fn error_json(error: &Error) -> serde_json::Value {
 
 #[allow(dead_code)]
 fn unused_btreemap(_: BTreeMap<String, String>) {}
+
+/// Constant-time byte comparison for stored approval-token hashes.
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (a, b) in left.iter().zip(right.iter()) {
+        diff |= a ^ b;
+    }
+    diff == 0
+}

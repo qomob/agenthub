@@ -1019,7 +1019,7 @@ fn v2_migration_rebuilds_tables_and_preserves_v1_data() {
     write_valid_skill_md(&source, "migrate", "Skill kept across the migration test.");
 
     let hub = fixture.hub();
-    assert_eq!(user_version(&hub), 2, "fresh databases migrate to v2");
+    assert_eq!(user_version(&hub), 3, "fresh databases migrate to v3");
     for table in [
         "capability_audits",
         "dependency_reports",
@@ -1085,7 +1085,7 @@ fn v2_migration_rebuilds_tables_and_preserves_v1_data() {
 
     // Reopening re-runs the v2 migration without touching v1 data.
     let hub = fixture.hub();
-    assert_eq!(user_version(&hub), 2);
+    assert_eq!(user_version(&hub), 3);
     for table in [
         "capability_audits",
         "dependency_reports",
@@ -1120,7 +1120,7 @@ fn v2_migration_rebuilds_tables_and_preserves_v1_data() {
 
     // Repeated opens stay idempotent.
     let hub = fixture.hub();
-    assert_eq!(user_version(&hub), 2);
+    assert_eq!(user_version(&hub), 3);
     assert_eq!(hub.list_skills().expect("skills").len(), 1);
     assert_eq!(hub.list_profiles().expect("profiles").len(), 4);
     assert_eq!(

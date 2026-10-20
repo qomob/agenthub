@@ -46,8 +46,31 @@ export type OperationStatus =
   | 'partial'
   | 'failed'
   | 'rolled_back'
+  | 'needs_manual_recovery'
+  | 'recovered'
 export type PlanAction = 'create' | 'replace' | 'noop' | 'conflict' | 'blocked' | 'remove'
 export type McpTransport = 'stdio' | 'http' | 'sse' | 'streamable_http'
+/** v3.1 approval lifecycle exposed by `OperationView.approvalState`. */
+export type ApprovalState = 'none' | 'approved' | 'expired'
+/** v3.1 recovery lifecycle exposed by `OperationView.recoveryState`. */
+export type RecoveryState = 'recovered' | 'needs_manual_recovery'
+
+// ---------------------------------------------------------------------------
+// v3.1 unified IPC envelope (mirrors `agenthub_core::contract`)
+// ---------------------------------------------------------------------------
+
+export interface ApiErrorPayload {
+  code: string
+  message: string
+  retryable: boolean
+  details?: unknown
+}
+
+/** `{ok:true,data,requestId}` | `{ok:false,error,requestId}`. */
+export type ApiResult<T> =
+  | { ok: true; data: T; error?: never; requestId: string }
+  | { ok: false; data?: never; error: ApiErrorPayload; requestId: string }
+
 
 // ---------------------------------------------------------------------------
 // Agents
@@ -502,6 +525,12 @@ export interface OperationPlan {
   requiresConfirmation: boolean
   summary: PlanSummary
   createdAt: string
+  /** v3.1: SHA-256 of the canonical plan payload; approval is bound to it. */
+  planHash: string
+  /** v3.1: ISO timestamp after which the plan/approval must be re-issued. */
+  expiresAt: string
+  /** v3.1: `none` / `approved` / `expired`. */
+  approvalState: string
 }
 
 export interface ItemResult {
@@ -522,6 +551,21 @@ export interface OperationResult {
   finishedAt: string | null
 }
 
+/** Durable journal entry for one target touched by an operation. */
+export interface OperationStepView {
+  id: string
+  operationId: string
+  sequenceNo: number
+  targetPath: string
+  beforeHash: string | null
+  afterHash: string | null
+  snapshotRef: string | null
+  state: string
+  errorCode: string | null
+  startedAt: string
+  finishedAt: string | null
+}
+
 export interface OperationView {
   id: string
   kind: OperationKind
@@ -537,6 +581,64 @@ export interface OperationView {
   plan: OperationPlan | null
   result: OperationResult | null
   canRollback: boolean
+  /** v3.1 approval surface. */
+  planHash: string | null
+  expiresAt: string | null
+  approvalState: string
+  approvedAt: string | null
+  recoveryState: string | null
+  steps: OperationStepView[]
+}
+
+/** One-time approval grant returned by `operations_approve`. */
+export interface ApprovalGrant {
+  operationId: string
+  planHash: string
+  /** Bearer token: keep in memory only, never log or persist in the UI. */
+  approvalToken: string
+  approvedAt: string
+  expiresAt: string
+}
+
+/** Result of `operations_recover`. */
+export interface RecoveryReport {
+  operationId: string
+  status: string
+  items: ItemResult[]
+  diagnostics: string[]
+  finishedAt: string
+}
+
+/** `PRAGMA integrity_check` + `foreign_key_check` result. */
+export interface IntegrityReport {
+  ok: boolean
+  schemaVersion: number
+  details: string[]
+}
+
+/**
+ * v3.1 per-agent feature evidence. `supportState` answers "is it possible",
+ * `evidenceLevel` answers "how strongly do we know". They are independent:
+ * a supported feature can still be unverified.
+ */
+export interface AdapterEvidenceView {
+  id: string
+  agentKey: string
+  featureKey: string
+  supportState: string
+  evidenceLevel: string
+  sourceUrl: string | null
+  testedAt: string | null
+  agentVersion: string | null
+  adapterVersion: string
+  notes: string | null
+}
+
+export interface AgentInspection {
+  agentId: string
+  agentKey: string
+  capabilities: AdapterEvidenceView[]
+  inspectedAt: string
 }
 
 export interface SnapshotView {

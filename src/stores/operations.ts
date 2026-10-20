@@ -9,6 +9,7 @@ import type {
   DoctorReport,
   OperationResult,
   OperationView,
+  RecoveryReport,
   SnapshotView,
 } from '../lib/types'
 
@@ -57,6 +58,16 @@ export const useOperationsStore = defineStore('operations', () => {
     const result = await api.rollbackOperation(id)
     await loadOperations().catch(() => undefined)
     return result
+  }
+
+  /**
+   * v3.1 recovery: only reached from an explicit user click. Targets changed
+   * outside AgentHub are reported back instead of being overwritten.
+   */
+  async function recover(id: string): Promise<RecoveryReport> {
+    const report = await api.operationsRecover(id)
+    await loadOperations().catch(() => undefined)
+    return report
   }
 
   async function loadSnapshots(operationId?: string): Promise<SnapshotView[]> {
@@ -141,6 +152,7 @@ export const useOperationsStore = defineStore('operations', () => {
     loadOperations,
     loadOperation,
     rollback,
+    recover,
     loadSnapshots,
     loadBackups,
     createBackup,

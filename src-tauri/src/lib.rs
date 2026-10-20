@@ -6,6 +6,7 @@
 
 use std::sync::Mutex;
 
+use agenthub_core::contract::{ApiError, ApiResult, ErrorCode};
 use agenthub_core::model::*;
 use agenthub_core::{AgentHub, CoreConfig};
 use tauri::State;
@@ -47,6 +48,34 @@ impl AppState {
                 .unwrap_or_else(|| "AgentHub is not initialized".to_string())
         })?;
         action(hub).map_err(|err| err.to_string())
+    }
+
+    /// v3.1 contract surface: every command returns the unified
+    /// `ApiResult<T>` envelope instead of a bare string error. The same
+    /// envelope (and error codes) is used by the CLI JSON mode.
+    fn run_api<T>(
+        &self,
+        action: impl FnOnce(&AgentHub) -> agenthub_core::Result<T>,
+    ) -> ApiResult<T> {
+        let guard = match self.hub.lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                return ApiResult::failure(ApiError::new(
+                    ErrorCode::Internal,
+                    "state lock poisoned",
+                ))
+            }
+        };
+        let Some(hub) = guard.as_ref() else {
+            let message = self
+                .init_error
+                .lock()
+                .ok()
+                .and_then(|error| error.clone())
+                .unwrap_or_else(|| "AgentHub is not initialized".to_string());
+            return ApiResult::failure(ApiError::new(ErrorCode::Internal, message));
+        };
+        ApiResult::from_result(action(hub))
     }
 }
 
@@ -211,6 +240,70 @@ fn operations_get(
     operation_id: String,
 ) -> Result<OperationView, String> {
     state.run(|hub| hub.get_operation(&operation_id))
+}
+
+// ---------------------------------------------------------------------------
+// v3.1 approval / recovery / evidence IPC (unified ApiResult envelope)
+// ---------------------------------------------------------------------------
+
+/// Read-only preview of the immutable plan, its hash, expiry and journal.
+#[tauri::command(rename_all = "snake_case")]
+fn operations_preview(
+    state: State<'_, AppState>,
+    operation_id: String,
+) -> ApiResult<OperationView> {
+    state.run_api(|hub| hub.preview_operation(&operation_id))
+}
+
+/// Issue a one-time approval token bound to `plan_hash`. The token is returned
+/// exactly once and is never persisted in clear text.
+#[tauri::command(rename_all = "snake_case")]
+fn operations_approve(
+    state: State<'_, AppState>,
+    operation_id: String,
+    plan_hash: String,
+) -> ApiResult<ApprovalGrant> {
+    state.run_api(|hub| hub.approve_operation(&operation_id, &plan_hash))
+}
+
+/// Apply an approved operation. The bearer token is only passed through; the
+/// UI must keep it in memory and must never log or store it.
+#[tauri::command(rename_all = "snake_case")]
+fn operations_apply_approved(
+    state: State<'_, AppState>,
+    operation_id: String,
+    approval_token: String,
+    idempotency_key: Option<String>,
+) -> ApiResult<OperationResult> {
+    state.run_api(|hub| {
+        hub.apply_operation_approved(
+            &operation_id,
+            &approval_token,
+            idempotency_key.as_deref(),
+        )
+    })
+}
+
+/// Compensate a failed/partial operation. Targets changed by another program
+/// are reported as `needs_manual_recovery` and are left untouched.
+#[tauri::command(rename_all = "snake_case")]
+fn operations_recover(
+    state: State<'_, AppState>,
+    operation_id: String,
+) -> ApiResult<RecoveryReport> {
+    state.run_api(|hub| hub.recover_operation(&operation_id))
+}
+
+/// Per-feature support state + evidence level for one agent instance.
+#[tauri::command(rename_all = "snake_case")]
+fn agents_inspect(state: State<'_, AppState>, agent_id: String) -> ApiResult<AgentInspection> {
+    state.run_api(|hub| hub.agent_inspect(&agent_id))
+}
+
+/// `PRAGMA integrity_check` + `foreign_key_check` for the local database.
+#[tauri::command(rename_all = "snake_case")]
+fn app_integrity(state: State<'_, AppState>) -> ApiResult<IntegrityReport> {
+    state.run_api(|hub| hub.integrity_report())
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -461,6 +554,12 @@ pub fn run() {
             operations_rollback,
             operations_list,
             operations_get,
+            operations_preview,
+            operations_approve,
+            operations_apply_approved,
+            operations_recover,
+            agents_inspect,
+            app_integrity,
             snapshots_list,
             backups_create,
             backups_list,

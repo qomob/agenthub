@@ -11,12 +11,13 @@ use std::path::{Path, PathBuf};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
+use crate::contract::ErrorCode;
 use crate::db::{Database, InstallationRow};
 use crate::error::{Error, Result};
 use crate::library::Library;
 use crate::model::{
-    ItemResult, OperationPlan, OperationResult, OperationStatus, PlanAction, PlanItem, SnapshotView,
-    InstallStrategy, InstallationState,
+    ItemResult, OperationPlan, OperationResult, OperationStatus, PlanAction, PlanItem,
+    RecoveryReport, SnapshotView, InstallStrategy, InstallationState,
 };
 use crate::skill;
 use crate::util;
@@ -81,6 +82,90 @@ pub fn current_target_hash(path: &Path) -> Option<String> {
         util::hash_dir(path).ok()
     } else {
         util::hash_file(path).ok()
+    }
+}
+
+/// Default lifetime of a v3.1 approval token.
+pub const APPROVAL_TTL_MINUTES: i64 = 15;
+
+/// Compute the canonical SHA-256 of a plan. The hash covers the semantic
+/// payload only (target, action, hashes, strategy, identifiers), so UI-only
+/// fields such as warnings or diffs cannot silently invalidate an approval.
+pub fn plan_digest(kind: &crate::model::OperationKind, items: &[PlanItem]) -> String {
+    let mut entries: Vec<serde_json::Value> = items
+        .iter()
+        .map(|item| {
+            serde_json::json!({
+                "target": item.target_path,
+                "action": item.action.as_str(),
+                "strategy": item.strategy.as_str(),
+                "currentHash": item.current_hash,
+                "desiredHash": item.desired_hash,
+                "capabilityId": item.capability_id,
+                "versionId": item.version_id,
+                "agentId": item.agent_id,
+                "agentKey": item.agent_key,
+                "installKind": item.install_kind,
+                "configKey": item.config_key,
+                "scope": item.scope.as_str(),
+                "payload": item.payload,
+            })
+        })
+        .collect();
+    entries.sort_by(|left, right| {
+        left.get("target")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .cmp(
+                right
+                    .get("target")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or(""),
+            )
+            .then_with(|| {
+                left.get("agentKey")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("")
+                    .cmp(
+                        right
+                            .get("agentKey")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or(""),
+                    )
+            })
+    });
+    let document = serde_json::json!({
+        "schema": "agenthub.plan.v1",
+        "kind": kind.as_str(),
+        "items": entries,
+    });
+    crate::contract::canonical_sha256(&document)
+}
+
+/// RFC3339 timestamp `minutes` from now.
+pub fn approval_expiry_from_now(minutes: i64) -> String {
+    (chrono::Utc::now() + chrono::Duration::minutes(minutes)).to_rfc3339()
+}
+
+/// Cryptographically random approval token (never persisted in clear text).
+pub fn new_approval_token() -> String {
+    format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    )
+}
+
+/// SHA-256 of a bearer token, which is what the database stores.
+pub fn approval_token_hash(token: &str) -> String {
+    crate::contract::sha256_hex(token.as_bytes())
+}
+
+/// True when an RFC3339 timestamp is in the past.
+pub fn approval_is_expired(expires_at: &str) -> bool {
+    match chrono::DateTime::parse_from_rfc3339(expires_at) {
+        Ok(value) => value.with_timezone(&chrono::Utc) <= chrono::Utc::now(),
+        Err(_) => true,
     }
 }
 
@@ -161,46 +246,93 @@ impl<'a> Executor<'a> {
                 ));
                 continue;
             }
+            let step_id = self.db.insert_operation_step(
+                &plan.operation_id,
+                index as i64,
+                &item.target_path,
+                item.current_hash.as_deref(),
+                "applying",
+            )?;
             match self.apply_item(&plan.operation_id, item, index, force) {
                 Ok(result) => {
+                    let after_hash = current_target_hash(&PathBuf::from(&item.target_path));
+                    let step_state = if result.status == "noop" {
+                        "skipped"
+                    } else {
+                        "applied"
+                    };
+                    self.db.finish_operation_step(
+                        &step_id,
+                        after_hash.as_deref(),
+                        result.backup_path.as_deref(),
+                        step_state,
+                        None,
+                    )?;
                     if result.status != "skipped" {
                         applied.push(item.clone());
                     }
                     results.push(result);
                 }
                 Err(err) => {
+                    let _ = self.db.finish_operation_step(
+                        &step_id,
+                        None,
+                        None,
+                        "failed",
+                        Some(ErrorCode::from(&err).as_str()),
+                    );
                     diagnostics.push(format!(
                         "item {} ({}) failed: {err}",
                         item.agent_key, item.target_path
                     ));
-                    // Undo everything already applied, newest first.
+                    // Compensate only targets whose content still matches our
+                    // own write. External edits are never overwritten.
+                    let mut manual_recovery = false;
                     for previous in applied.iter().rev() {
-                        if let Err(undo_err) = self.undo_item(&plan.operation_id, previous, true) {
+                        if let Err(undo_err) = self.undo_item(&plan.operation_id, previous, false) {
+                            manual_recovery = true;
                             diagnostics.push(format!(
-                                "automatic undo failed for {}: {undo_err}",
+                                "automatic undo blocked for {}: {undo_err}",
                                 previous.target_path
                             ));
                         }
                     }
+                    let final_status = if manual_recovery {
+                        OperationStatus::NeedsManualRecovery
+                    } else {
+                        OperationStatus::Failed
+                    };
                     let result = OperationResult {
                         operation_id: plan.operation_id.clone(),
-                        status: OperationStatus::Failed,
+                        status: final_status,
                         items: results,
                         diagnostics,
                         finished_at: Some(util::now()),
                     };
                     self.db.update_operation_status(
                         &plan.operation_id,
-                        "failed",
+                        final_status.as_str(),
                         &serde_json::to_string(&result)?,
                         Some(&err.to_string()),
+                    )?;
+                    self.db.set_operation_state(
+                        &plan.operation_id,
+                        final_status.as_str(),
+                        if manual_recovery {
+                            Some("needs_manual_recovery")
+                        } else {
+                            Some("compensated")
+                        },
+                        None,
                     )?;
                     audit_log(
                         self.library,
                         "operation.failed",
                         serde_json::json!({
                             "operationId": plan.operation_id,
+                            "status": final_status.as_str(),
                             "error": err.to_string(),
+                            "manualRecovery": manual_recovery,
                         }),
                     );
                     return Ok(result);
@@ -785,6 +917,208 @@ impl<'a> Executor<'a> {
             }
         }
         Ok(())
+    }
+
+    /// v3.1 crash/failure recovery. Walks the durable journal backwards and
+    /// only restores targets whose current hash still equals the hash this
+    /// operation wrote. Anything modified by another program is reported as
+    /// `needs_manual_recovery` instead of being overwritten.
+    pub fn recover(&self, operation_id: &str) -> Result<RecoveryReport> {
+        let operation = self
+            .db
+            .get_operation(operation_id)?
+            .ok_or_else(|| Error::not_found(format!("operation {operation_id} does not exist")))?;
+        let status = OperationStatus::parse(&operation.status);
+        if !matches!(
+            status,
+            OperationStatus::Failed
+                | OperationStatus::Partial
+                | OperationStatus::NeedsManualRecovery
+                | OperationStatus::Running
+        ) {
+            return Err(Error::conflict(format!(
+                "operation in state '{}' cannot be recovered",
+                operation.status
+            )));
+        }
+        let plan: OperationPlan = serde_json::from_str(&operation.plan)
+            .map_err(|err| Error::msg(format!("operation plan is unreadable: {err}")))?;
+        let steps = self.db.list_operation_steps(operation_id)?;
+        let snapshots = self.db.list_snapshots(operation_id)?;
+        let _lock = acquire_lock(self.library)?;
+        let mut results = Vec::new();
+        let mut diagnostics = Vec::new();
+        let mut manual = false;
+
+        for step in steps.iter().rev() {
+            if step.state != "applied" {
+                continue;
+            }
+            let target = PathBuf::from(&step.target_path);
+            let current = current_target_hash(&target);
+            let plan_item = plan
+                .items
+                .iter()
+                .find(|item| item.target_path == step.target_path)
+                .cloned();
+            let programmatic_target = plan_item.as_ref().map(|item| item.agent_key.clone()).unwrap_or_default();
+            if current.is_some() && current == step.after_hash {
+                let snapshot = snapshots
+                    .iter()
+                    .rev()
+                    .find(|row| row.original_path == step.target_path)
+                    .map(|row| SnapshotInfo {
+                        kind: row.kind.clone(),
+                        backup_path: row.backup_path.clone(),
+                        existed: row.existed,
+                        hash_before: row.hash_before.clone(),
+                    })
+                    .unwrap_or(SnapshotInfo {
+                        kind: "absent".to_string(),
+                        backup_path: String::new(),
+                        existed: false,
+                        hash_before: step.before_hash.clone(),
+                    });
+                match self.restore_snapshot(&target, &snapshot) {
+                    Ok(()) => {
+                        self.db.finish_operation_step(
+                            &step.id,
+                            step.before_hash.as_deref(),
+                            None,
+                            "recovered",
+                            None,
+                        )?;
+                        if let Some(item) = &plan_item {
+                            match &item.previous_installation {
+                                Some(previous) => {
+                                    if let Ok(row) = serde_json::from_value::<InstallationRow>(previous.clone()) {
+                                        self.db.upsert_installation(&row)?;
+                                    }
+                                }
+                                None => {
+                                    if let Some(existing) = self
+                                        .db
+                                        .find_installation(&item.agent_id, &item.target_path)?
+                                    {
+                                        self.db.delete_installation(&existing.id)?;
+                                    }
+                                }
+                            }
+                        }
+                        results.push(ItemResult {
+                            plan_item_id: String::new(),
+                            agent_key: programmatic_target,
+                            target_path: step.target_path.clone(),
+                            status: "success".to_string(),
+                            message: "Restored pre-operation content".to_string(),
+                            backup_path: Some(snapshot.backup_path.clone()).filter(|value| !value.is_empty()),
+                            installation_id: None,
+                        });
+                    }
+                    Err(err) => {
+                        manual = true;
+                        diagnostics.push(format!("{}: restore failed: {err}", step.target_path));
+                        results.push(ItemResult {
+                            plan_item_id: String::new(),
+                            agent_key: programmatic_target,
+                            target_path: step.target_path.clone(),
+                            status: "failed".to_string(),
+                            message: err.to_string(),
+                            backup_path: None,
+                            installation_id: None,
+                        });
+                    }
+                }
+            } else if current == step.before_hash
+                || (current.is_none() && step.before_hash.is_none())
+            {
+                self.db.finish_operation_step(
+                    &step.id,
+                    step.before_hash.as_deref(),
+                    None,
+                    "recovered",
+                    None,
+                )?;
+                results.push(ItemResult {
+                    plan_item_id: String::new(),
+                    agent_key: programmatic_target,
+                    target_path: step.target_path.clone(),
+                    status: "noop".to_string(),
+                    message: "Target already matches pre-operation content".to_string(),
+                    backup_path: None,
+                    installation_id: None,
+                });
+            } else {
+                manual = true;
+                let _ = self.db.finish_operation_step(
+                    &step.id,
+                    current.as_deref(),
+                    None,
+                    "blocked",
+                    Some(ErrorCode::ExternalModification.as_str()),
+                );
+                diagnostics.push(format!(
+                    "{} was modified outside AgentHub (expected {:?}, found {:?}); left untouched",
+                    step.target_path, step.after_hash, current
+                ));
+                results.push(ItemResult {
+                    plan_item_id: String::new(),
+                    agent_key: programmatic_target,
+                    target_path: step.target_path.clone(),
+                    status: "failed".to_string(),
+                    message: "External modification detected; manual recovery required".to_string(),
+                    backup_path: None,
+                    installation_id: None,
+                });
+            }
+        }
+
+        let final_status = if manual {
+            OperationStatus::NeedsManualRecovery
+        } else {
+            OperationStatus::Recovered
+        };
+        let finished_at = util::now();
+        let report = RecoveryReport {
+            operation_id: operation_id.to_string(),
+            status: final_status.as_str().to_string(),
+            items: results.clone(),
+            diagnostics: diagnostics.clone(),
+            finished_at: finished_at.clone(),
+        };
+        self.db.set_operation_state(
+            operation_id,
+            final_status.as_str(),
+            Some(if manual {
+                "needs_manual_recovery"
+            } else {
+                "recovered"
+            }),
+            None,
+        )?;
+        let synthetic = OperationResult {
+            operation_id: operation_id.to_string(),
+            status: final_status,
+            items: results,
+            diagnostics,
+            finished_at: Some(finished_at),
+        };
+        self.db.update_operation_status(
+            operation_id,
+            final_status.as_str(),
+            &serde_json::to_string(&synthetic)?,
+            None,
+        )?;
+        audit_log(
+            self.library,
+            "operation.recovered",
+            serde_json::json!({
+                "operationId": operation_id,
+                "status": final_status.as_str(),
+                "manual": manual,
+            }),
+        );
+        Ok(report)
     }
 
     pub fn rollback(&self, operation_id: &str) -> Result<OperationResult> {

@@ -24,10 +24,18 @@ import {
   toneForSymlinkSupport,
   transportKey,
 } from '../lib/status'
+import {
+  capabilityAvailabilityInfo,
+  evidenceLevelInfo,
+  featureLabelKey,
+  supportStateInfo,
+} from '../lib/v31'
 import type {
+  AdapterEvidenceView,
   AgentDoctorCheck,
   AgentHealth,
   AgentHealthReport,
+  AgentInspection,
   AgentView,
   DoctorReport,
 } from '../lib/types'
@@ -53,6 +61,11 @@ const saveError = ref<string | null>(null)
 const doctor = ref<DoctorReport | null>(null)
 const doctorLoading = ref(false)
 const doctorError = ref<string | null>(null)
+
+// v3.1 capability evidence for the selected agent (support state + evidence).
+const inspection = ref<AgentInspection | null>(null)
+const inspectionLoading = ref(false)
+const inspectionError = ref<string | null>(null)
 
 const healthReport = ref<AgentHealthReport | null>(null)
 const healthLoading = ref(false)
@@ -168,15 +181,49 @@ async function loadEvidence(): Promise<void> {
   }
 }
 
+async function loadInspection(agentId: string): Promise<void> {
+  inspectionLoading.value = true
+  inspectionError.value = null
+  inspection.value = null
+  try {
+    inspection.value = await api.agentsInspect(agentId)
+  } catch (err) {
+    inspectionError.value = normalizeError(err, t('agents.capabilitiesFailed'))
+  } finally {
+    inspectionLoading.value = false
+  }
+}
+
+function featureLabel(featureKey: string): string {
+  const key = featureLabelKey(featureKey)
+  return key ? t(key) : featureKey
+}
+
+function supportLabel(state: string): string {
+  const info = supportStateInfo(state)
+  return info.key ? t(info.key) : state
+}
+
+function evidenceLabel(level: string): string {
+  const info = evidenceLevelInfo(level)
+  return info.key ? t(info.key) : level
+}
+
+function availabilityLabel(item: AdapterEvidenceView): string {
+  return t(capabilityAvailabilityInfo(item).key)
+}
+
 async function openAgent(agent: AgentView): Promise<void> {
   activeAgent.value = agent
   saveError.value = null
   syncForm(agent)
-  await loadEvidence()
+  await Promise.all([loadEvidence(), loadInspection(agent.id)])
 }
 
 function closeDetails(): void {
   activeAgent.value = null
+  inspection.value = null
+  inspectionError.value = null
   if (route.query.agent) void router.replace({ name: 'agents' })
 }
 
@@ -525,6 +572,95 @@ function rootSummary(agent: AgentView): string {
               {{ t('agents.recheckVersion') }}
             </button>
           </div>
+        </section>
+
+        <hr class="divider" />
+
+        <section>
+          <p class="section-title">{{ t('agents.capabilitiesTitle') }}</p>
+          <p class="hint" style="margin-bottom: 7px">{{ t('agents.capabilitiesLead') }}</p>
+          <LoadingState v-if="inspectionLoading" :label="t('agents.capabilitiesLoading')" compact />
+          <ErrorBanner
+            v-else-if="inspectionError"
+            :message="inspectionError"
+            :title="t('agents.capabilitiesFailed')"
+            :retry-label="t('common.retry')"
+            @retry="loadInspection(activeAgent.id)"
+          />
+          <div v-else-if="inspection" class="stack-sm">
+            <div class="row row-wrap" style="justify-content: space-between">
+              <p class="hint">
+                {{ t('agents.capabilitiesInspectedAt') }}：{{ formatDateTime(inspection.inspectedAt, locale) }}
+              </p>
+              <button
+                type="button"
+                class="btn btn-sm"
+                :disabled="inspectionLoading"
+                @click="loadInspection(activeAgent.id)"
+              >
+                <span v-if="inspectionLoading" class="spinner spinner-sm" aria-hidden="true" />
+                <Icon v-else name="refresh" :size="12" />
+                {{ t('agents.capabilitiesRefresh') }}
+              </button>
+            </div>
+            <div v-if="inspection.capabilities.length > 0" class="table-wrap surface-inset">
+              <table class="table table-compact">
+                <thead>
+                  <tr>
+                    <th scope="col">{{ t('agents.capabilityFeature') }}</th>
+                    <th scope="col">{{ t('agents.capabilitySupport') }}</th>
+                    <th scope="col">{{ t('agents.capabilityEvidence') }}</th>
+                    <th scope="col">{{ t('agents.capabilityAvailability') }}</th>
+                    <th scope="col">{{ t('agents.capabilitySource') }}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="item in inspection.capabilities" :key="item.id">
+                    <td>{{ featureLabel(item.featureKey) }}</td>
+                    <td>
+                      <StatusBadge
+                        :label="supportLabel(item.supportState)"
+                        :tone="supportStateInfo(item.supportState).tone"
+                      />
+                    </td>
+                    <td>
+                      <StatusBadge
+                        :label="evidenceLabel(item.evidenceLevel)"
+                        :tone="evidenceLevelInfo(item.evidenceLevel).tone"
+                      />
+                    </td>
+                    <td>
+                      <StatusBadge
+                        :label="availabilityLabel(item)"
+                        :tone="capabilityAvailabilityInfo(item).tone"
+                      />
+                    </td>
+                    <td class="text-xs">
+                      <p v-if="item.sourceUrl" class="path-text mono">{{ item.sourceUrl }}</p>
+                      <p v-else class="hint">{{ t('agents.capabilityNoSource') }}</p>
+                      <p class="hint">
+                        {{ t('agents.capabilityTestedAt') }}：
+                        {{
+                          item.testedAt
+                            ? formatDateTime(item.testedAt, locale)
+                            : t('agents.capabilityUntested')
+                        }}
+                      </p>
+                      <p class="hint">
+                        {{ t('agents.capabilityAdapterVersion') }}：{{ item.adapterVersion }}
+                      </p>
+                      <p v-if="item.agentVersion" class="hint">
+                        {{ t('agents.capabilityAgentVersion') }}：{{ item.agentVersion }}
+                      </p>
+                      <p v-if="item.notes" class="hint">{{ item.notes }}</p>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <p v-else class="hint">{{ t('agents.capabilitiesEmpty') }}</p>
+          </div>
+          <p v-else class="hint">{{ t('agents.capabilitiesEmpty') }}</p>
         </section>
 
         <hr class="divider" />

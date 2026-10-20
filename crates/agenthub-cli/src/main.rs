@@ -10,9 +10,16 @@
 //!
 //! Exit codes:
 //!   0  success
-//!   1  failure (invalid input, I/O or engine error)
+//!   1  failure for the legacy commands (invalid input, I/O or engine error)
 //!   2  partial success, or a plan that contains blocked/conflict items, or a
 //!      plan that was printed for confirmation because `--yes` was missing
+//!   3  invalid input / unsupported capability (v3.1 API contract)
+//!   4  approval required, stale plan, expired approval or wrong token
+//!   5  runtime failure or a recovery that needs manual intervention
+//!
+//! The v3.1 commands (`operations preview|approve|apply|recover`,
+//! `agents inspect`) emit the shared `ApiResult` envelope as JSON, and their
+//! `error.code` is derived from the same classification as the exit code.
 //!
 //! Every mutating command follows the same contract: a plan is produced first
 //! and printed; nothing is written unless `--yes` is passed and the plan has no
@@ -20,6 +27,7 @@
 
 use std::path::{Path, PathBuf};
 
+use agenthub_core::contract::{ApiError, ApiResult, ErrorCode};
 use agenthub_core::model::*;
 use agenthub_core::{AgentHub, CoreConfig};
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -27,8 +35,13 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 const EXIT_OK: u8 = 0;
+/// Legacy commands keep their historical generic-failure code.
 const EXIT_FAIL: u8 = 1;
 const EXIT_PARTIAL: u8 = 2;
+/// v3.1: approval required, stale plan, expired approval, wrong token.
+const EXIT_APPROVAL: u8 = 4;
+/// v3.1: runtime failure, or a recovery that needs manual intervention.
+const EXIT_RUNTIME: u8 = 5;
 
 // ---------------------------------------------------------------------------
 // CLI definition
@@ -98,6 +111,8 @@ enum Commands {
 enum AgentsCommand {
     /// List every supported agent with detection status and roots.
     List,
+    /// Inspect one agent: adapter support state and evidence (v3.1).
+    Inspect(AgentInspectArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -142,6 +157,14 @@ enum McpCommand {
 enum OperationsCommand {
     /// List recent operations.
     List(OperationsArgs),
+    /// Read-only approval preview: plan hash, expiry, approval state, journal.
+    Preview(OperationIdArgs),
+    /// Approve a planned operation and print its one-time approval token.
+    Approve(ApproveArgs),
+    /// Apply an approved operation with its one-time token.
+    Apply(ApplyArgs),
+    /// Recover a failed/partial operation from its durable journal.
+    Recover(OperationIdArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -362,44 +385,171 @@ struct OperationsArgs {
     limit: usize,
 }
 
+#[derive(Debug, Args)]
+struct OperationIdArgs {
+    /// Operation id (see `operations list`).
+    id: String,
+}
+
+#[derive(Debug, Args)]
+struct ApproveArgs {
+    /// Operation id to approve.
+    id: String,
+    /// Plan hash from `operations preview` / the plan that was shown to the user.
+    #[arg(long = "plan-hash", value_name = "HASH")]
+    plan_hash: String,
+}
+
+#[derive(Debug, Args)]
+struct ApplyArgs {
+    /// Operation id to apply.
+    id: String,
+    /// One-time approval token printed by `operations approve`.
+    #[arg(long, value_name = "TOKEN")]
+    token: String,
+    /// Optional idempotency key so a retried apply reuses the stored result.
+    #[arg(long = "idempotency-key", value_name = "KEY")]
+    idempotency_key: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct AgentInspectArgs {
+    /// Agent key or id (see `agents list`).
+    agent_key: String,
+}
+
 // ---------------------------------------------------------------------------
 // Error / entry point
 // ---------------------------------------------------------------------------
 
+/// The v3.1 command family whose failures are classified into the shared
+/// `ApiResult` envelope. The context matters because the same core error can
+/// mean "stale plan" for one command and "runtime failure" for another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApiContext {
+    Preview,
+    Approve,
+    Apply,
+    Recover,
+    Inspect,
+}
+
+/// A classified API failure: `ApiError` (code/message/retryable/details) plus
+/// the process exit code produced by the same classification.
+#[derive(Debug, Clone)]
+struct ApiFailure {
+    error: ApiError,
+    exit: u8,
+}
+
 #[derive(Debug)]
-struct CliError(String);
+struct CliError {
+    message: String,
+    /// Present for the v3.1 commands; legacy commands leave it `None` so their
+    /// long-standing exit code 1 / plain stderr behaviour is preserved.
+    api: Option<ApiFailure>,
+}
+
+impl CliError {
+    fn legacy(message: impl Into<String>) -> Self {
+        CliError {
+            message: message.into(),
+            api: None,
+        }
+    }
+
+    fn api(failure: ApiFailure) -> Self {
+        CliError {
+            message: failure.error.message.clone(),
+            api: Some(failure),
+        }
+    }
+
+    fn invalid_input(message: impl Into<String>) -> Self {
+        let code = ErrorCode::InvalidInput;
+        CliError::api(ApiFailure {
+            error: ApiError::new(code, message),
+            exit: code.exit_code(),
+        })
+    }
+}
 
 impl std::fmt::Display for CliError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.0)
+        formatter.write_str(&self.message)
     }
 }
 
 impl From<agenthub_core::Error> for CliError {
     fn from(value: agenthub_core::Error) -> Self {
-        CliError(value.to_string())
+        CliError::legacy(value.to_string())
     }
 }
 
 impl From<serde_json::Error> for CliError {
     fn from(value: serde_json::Error) -> Self {
-        CliError(format!("json error: {value}"))
+        CliError::legacy(format!("json error: {value}"))
     }
 }
 
 impl From<String> for CliError {
     fn from(value: String) -> Self {
-        CliError(value)
+        CliError::legacy(value)
     }
 }
 
 impl From<&str> for CliError {
     fn from(value: &str) -> Self {
-        CliError(value.to_string())
+        CliError::legacy(value.to_string())
     }
 }
 
 type CliResult<T> = std::result::Result<T, CliError>;
+
+/// Map a core error to a stable code + exit code for the v3.1 commands.
+///
+/// `ErrorCode::exit_code()` is the baseline. Approval/staleness contexts remap
+/// the sandbox/conflict family to `PLAN_STALE` (exit 4) as required by
+/// `API_CONTRACTS.md` §6: missing approval, wrong token, expired approval and
+/// a changed plan all mean "ask the user to re-approve", not "permission
+/// denied" or "runtime failure".
+fn map_api_error(context: ApiContext, error: &agenthub_core::Error) -> CliError {
+    use agenthub_core::Error as CoreError;
+    let base = ErrorCode::from(error);
+    let (code, exit) = match context {
+        ApiContext::Approve => match error {
+            CoreError::Conflict(_)
+            | CoreError::Blocked(_)
+            | CoreError::ExternalModification(_) => (ErrorCode::PlanStale, EXIT_APPROVAL),
+            _ => (base, base.exit_code()),
+        },
+        ApiContext::Apply => match error {
+            CoreError::Conflict(_) | CoreError::Blocked(_) => {
+                (ErrorCode::PlanStale, EXIT_APPROVAL)
+            }
+            // CAS races are runtime/recovery failures, not approval failures.
+            CoreError::ExternalModification(_) => (base, base.exit_code()),
+            _ => (base, base.exit_code()),
+        },
+        ApiContext::Preview | ApiContext::Recover | ApiContext::Inspect => {
+            (base, base.exit_code())
+        }
+    };
+    let mut api_error = ApiError::from_error(error);
+    api_error.code = code;
+    api_error.retryable = code.retryable();
+    CliError::api(ApiFailure {
+        error: api_error,
+        exit,
+    })
+}
+
+fn api_call<T>(
+    context: ApiContext,
+    result: agenthub_core::Result<T>,
+) -> CliResult<T> {
+    result.map_err(|error| map_api_error(context, &error))
+}
 
 fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
@@ -407,14 +557,29 @@ fn main() -> std::process::ExitCode {
     match run(cli) {
         Ok(code) => std::process::ExitCode::from(code),
         Err(error) => {
+            let CliError { message, api } = error;
+            if let Some(failure) = api {
+                if json {
+                    let envelope = ApiResult::<Value>::failure(failure.error);
+                    match serde_json::to_string_pretty(&envelope) {
+                        Ok(text) => eprintln!("{text}"),
+                        Err(_) => eprintln!(
+                            "{{\"ok\":false,\"error\":{{\"code\":\"INTERNAL\",\"message\":\"cannot serialize error\",\"retryable\":false}}}}"
+                        ),
+                    }
+                } else {
+                    eprintln!("error: {message}");
+                }
+                return std::process::ExitCode::from(failure.exit);
+            }
             if json {
-                let payload = json!({ "ok": false, "error": error.to_string() });
+                let payload = json!({ "ok": false, "error": message });
                 eprintln!(
                     "{}",
                     serde_json::to_string(&payload).unwrap_or_else(|_| "{\"ok\":false}".to_string())
                 );
             } else {
-                eprintln!("error: {error}");
+                eprintln!("error: {message}");
             }
             std::process::ExitCode::from(EXIT_FAIL)
         }
@@ -431,6 +596,7 @@ fn run(cli: Cli) -> CliResult<u8> {
         Commands::Doctor => cmd_doctor(&ctx),
         Commands::Agents { command } => match command {
             AgentsCommand::List => cmd_agents_list(&ctx),
+            AgentsCommand::Inspect(args) => cmd_agents_inspect(&ctx, args),
         },
         Commands::Skills { command } => match command {
             SkillsCommand::List => cmd_skills_list(&ctx),
@@ -453,6 +619,10 @@ fn run(cli: Cli) -> CliResult<u8> {
         },
         Commands::Operations { command } => match command {
             OperationsCommand::List(args) => cmd_operations_list(&ctx, args),
+            OperationsCommand::Preview(args) => cmd_operations_preview(&ctx, args),
+            OperationsCommand::Approve(args) => cmd_operations_approve(&ctx, args),
+            OperationsCommand::Apply(args) => cmd_operations_apply(&ctx, args),
+            OperationsCommand::Recover(args) => cmd_operations_recover(&ctx, args),
         },
         Commands::Profiles { command } => match command {
             ProfilesCommand::List => cmd_profiles_list(&ctx),
@@ -492,6 +662,18 @@ impl Ctx {
         if self.json {
             print_json(&value);
         }
+    }
+
+    /// Emit the v3.1 success envelope (`{ok,data,requestId}`) in JSON mode.
+    /// Returns the generated request id so human output can reference it too.
+    fn emit_api_success<T: Serialize>(&self, data: T) -> CliResult<String> {
+        let envelope = ApiResult::success(data);
+        let request_id = envelope.request_id.clone();
+        if self.json {
+            let value = serde_json::to_value(&envelope)?;
+            print_json(&value);
+        }
+        Ok(request_id)
     }
 }
 
@@ -703,14 +885,14 @@ fn resolve_agent_ids(hub: &AgentHub, keys: &[String]) -> CliResult<Vec<String>> 
     }
     if !unknown.is_empty() {
         let available: Vec<&str> = agents.iter().map(|agent| agent.key.as_str()).collect();
-        return Err(CliError(format!(
+        return Err(CliError::legacy(format!(
             "unknown agent key(s): {}; available agents: {}",
             unknown.join(", "),
             available.join(", ")
         )));
     }
     if ids.is_empty() {
-        return Err(CliError("no agent keys were given".to_string()));
+        return Err(CliError::legacy("no agent keys were given".to_string()));
     }
     Ok(ids)
 }
@@ -724,11 +906,11 @@ fn resolve_skill_id(hub: &AgentHub, wanted: &str) -> CliResult<String> {
     }
     let available: Vec<&str> = skills.iter().map(|skill| skill.slug.as_str()).collect();
     if available.is_empty() {
-        Err(CliError(format!(
+        Err(CliError::legacy(format!(
             "skill '{wanted}' does not exist; the library is empty (import a skill first)"
         )))
     } else {
-        Err(CliError(format!(
+        Err(CliError::legacy(format!(
             "skill '{wanted}' does not exist; available skills: {}",
             available.join(", ")
         )))
@@ -810,6 +992,49 @@ fn cmd_agents_list(ctx: &Ctx) -> CliResult<u8> {
                 );
             }
         }
+    }
+    Ok(EXIT_OK)
+}
+
+// ---------------------------------------------------------------------------
+// agents inspect (v3.1)
+// ---------------------------------------------------------------------------
+
+fn cmd_agents_inspect(ctx: &Ctx, args: AgentInspectArgs) -> CliResult<u8> {
+    let agents = api_call(ApiContext::Inspect, ctx.hub.list_agents())?;
+    let wanted = args.agent_key.trim();
+    let agent = agents
+        .iter()
+        .find(|agent| agent.key == wanted || agent.id == wanted)
+        .ok_or_else(|| {
+            let available: Vec<&str> = agents.iter().map(|agent| agent.key.as_str()).collect();
+            CliError::invalid_input(format!(
+                "unknown agent '{}'; available agents: {}",
+                wanted,
+                available.join(", ")
+            ))
+        })?;
+    let inspection = api_call(ApiContext::Inspect, ctx.hub.agent_inspect(&agent.id))?;
+    let request_id = ctx.emit_api_success(&inspection)?;
+    if !ctx.json {
+        println!(
+            "Agent {} ({})  id={}",
+            inspection.agent_key, agent.name, inspection.agent_id
+        );
+        println!("  inspected at: {}", inspection.inspected_at);
+        if inspection.capabilities.is_empty() {
+            println!("  no adapter capability evidence recorded yet");
+        }
+        for capability in &inspection.capabilities {
+            println!(
+                "  {:<28} support={:<22} evidence={}",
+                capability.feature_key, capability.support_state, capability.evidence_level
+            );
+            if let Some(note) = &capability.notes {
+                println!("      note: {note}");
+            }
+        }
+        println!("  request id: {request_id}");
     }
     Ok(EXIT_OK)
 }
@@ -951,7 +1176,7 @@ fn cmd_skills_import(ctx: &Ctx, args: ImportArgs) -> CliResult<u8> {
 fn import_source(args: &ImportArgs) -> CliResult<ImportSource> {
     if let Some(url) = &args.git {
         if url.trim().is_empty() {
-            return Err(CliError("--git requires a non-empty URL".to_string()));
+            return Err(CliError::legacy("--git requires a non-empty URL".to_string()));
         }
         return Ok(ImportSource::Git {
             url: url.clone(),
@@ -959,12 +1184,12 @@ fn import_source(args: &ImportArgs) -> CliResult<ImportSource> {
         });
     }
     let Some(path) = &args.path else {
-        return Err(CliError(
+        return Err(CliError::legacy(
             "nothing to import: pass --path <dir|zip|SKILL.md> or --git <url>".to_string(),
         ));
     };
     if !path.exists() {
-        return Err(CliError(format!(
+        return Err(CliError::legacy(format!(
             "import path does not exist: {}",
             path.display()
         )));
@@ -987,7 +1212,7 @@ fn import_source(args: &ImportArgs) -> CliResult<ImportSource> {
             path: path.to_string_lossy().to_string(),
         })
     } else {
-        Err(CliError(format!(
+        Err(CliError::legacy(format!(
             "unsupported import path (expected a folder, .zip or SKILL.md): {}",
             path.display()
         )))
@@ -1191,7 +1416,7 @@ fn cmd_skills_impact(ctx: &Ctx, args: ImpactArgs) -> CliResult<u8> {
     let skill = skills
         .iter()
         .find(|skill| skill.id == capability_id)
-        .ok_or_else(|| CliError("skill disappeared".to_string()))?;
+        .ok_or_else(|| CliError::legacy("skill disappeared".to_string()))?;
     let to_version = match args.to_version {
         Some(version) => version,
         None => skill.current_version_id.clone(),
@@ -1492,7 +1717,7 @@ fn cmd_skills_rollback(ctx: &Ctx, args: RollbackArgs) -> CliResult<u8> {
             .into_iter()
             .find(|operation| operation.can_rollback)
             .map(|operation| operation.id)
-            .ok_or_else(|| CliError("there is no rollbackable operation".to_string()))?
+            .ok_or_else(|| CliError::legacy("there is no rollbackable operation".to_string()))?
     } else {
         args.target.clone()
     };
@@ -1603,12 +1828,12 @@ fn cmd_mcp_distribute(ctx: &Ctx, args: McpDistributeArgs) -> CliResult<u8> {
         .ok_or_else(|| {
             let available: Vec<&str> = servers.iter().map(|server| server.name.as_str()).collect();
             if available.is_empty() {
-                CliError(format!(
+                CliError::legacy(format!(
                     "MCP server '{}' does not exist; no MCP servers are defined yet",
                     args.server_id
                 ))
             } else {
-                CliError(format!(
+                CliError::legacy(format!(
                     "MCP server '{}' does not exist; available servers: {}",
                     args.server_id,
                     available.join(", ")
@@ -1674,6 +1899,166 @@ fn cmd_operations_list(ctx: &Ctx, args: OperationsArgs) -> CliResult<u8> {
         }
     }
     Ok(EXIT_OK)
+}
+
+// ---------------------------------------------------------------------------
+// operations preview / approve / apply / recover (v3.1)
+// ---------------------------------------------------------------------------
+
+/// Success payload of `operations apply`: the shared `OperationResult` DTO
+/// flattened together with the plan hash the approval was bound to.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ApplyData<'a> {
+    #[serde(flatten)]
+    result: &'a OperationResult,
+    plan_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    idempotency_key: Option<&'a str>,
+}
+
+/// Exit code implied by a freshly applied operation.
+fn operation_status_exit(status: OperationStatus) -> u8 {
+    match status {
+        OperationStatus::Success => EXIT_OK,
+        OperationStatus::Partial => EXIT_PARTIAL,
+        OperationStatus::Failed | OperationStatus::NeedsManualRecovery => EXIT_RUNTIME,
+        _ => EXIT_OK,
+    }
+}
+
+fn cmd_operations_preview(ctx: &Ctx, args: OperationIdArgs) -> CliResult<u8> {
+    let view = api_call(
+        ApiContext::Preview,
+        ctx.hub.preview_operation(&args.id),
+    )?;
+    ctx.emit_api_success(&view)?;
+    if !ctx.json {
+        println!(
+            "Operation {}  kind={}  status={}",
+            view.id,
+            enum_label(&view.kind),
+            enum_label(&view.status)
+        );
+        println!("  summary: {}", view.summary);
+        println!(
+            "  plan hash: {}",
+            view.plan_hash.as_deref().unwrap_or("-")
+        );
+        println!(
+            "  approval: {}  approved at: {}  expires at: {}",
+            view.approval_state,
+            view.approved_at.as_deref().unwrap_or("-"),
+            view.expires_at.as_deref().unwrap_or("-")
+        );
+        if let Some(recovery_state) = &view.recovery_state {
+            println!("  recovery state: {recovery_state}");
+        }
+        if let Some(plan) = &view.plan {
+            println!();
+            print_plan(plan);
+        }
+        if !view.steps.is_empty() {
+            println!("Journal:");
+            for step in &view.steps {
+                println!(
+                    "  #{:<3} state={:<10} target={} before={} after={}",
+                    step.sequence_no,
+                    step.state,
+                    step.target_path,
+                    hash_prefix(step.before_hash.as_deref()),
+                    hash_prefix(step.after_hash.as_deref())
+                );
+                if let Some(code) = &step.error_code {
+                    println!("       error code: {code}");
+                }
+            }
+        }
+        if view.approval_state == "none" && view.status.as_str() == "planned" {
+            println!(
+                "\nNext: agenthub operations approve {} --plan-hash {}",
+                view.id,
+                view.plan_hash.as_deref().unwrap_or("<plan-hash>")
+            );
+        }
+    }
+    Ok(EXIT_OK)
+}
+
+fn cmd_operations_approve(ctx: &Ctx, args: ApproveArgs) -> CliResult<u8> {
+    let grant = api_call(
+        ApiContext::Approve,
+        ctx.hub.approve_operation(&args.id, &args.plan_hash),
+    )?;
+    ctx.emit_api_success(&grant)?;
+    if !ctx.json {
+        println!("Approved operation {}", grant.operation_id);
+        println!("  plan hash: {}", grant.plan_hash);
+        println!("  expires at: {}", grant.expires_at);
+        println!("  approval token (one-time, keep secret):");
+        println!("    {}", grant.approval_token);
+        println!(
+            "\nNext: agenthub operations apply {} --token {}",
+            grant.operation_id, grant.approval_token
+        );
+    }
+    Ok(EXIT_OK)
+}
+
+fn cmd_operations_apply(ctx: &Ctx, args: ApplyArgs) -> CliResult<u8> {
+    let result = api_call(
+        ApiContext::Apply,
+        ctx.hub.apply_operation_approved(
+            &args.id,
+            &args.token,
+            args.idempotency_key.as_deref(),
+        ),
+    )?;
+    let plan_hash = ctx
+        .hub
+        .preview_operation(&args.id)
+        .ok()
+        .and_then(|view| view.plan_hash);
+    let exit = operation_status_exit(result.status);
+    ctx.emit_api_success(ApplyData {
+        result: &result,
+        plan_hash,
+        idempotency_key: args.idempotency_key.as_deref(),
+    })?;
+    if !ctx.json {
+        print_result(&result);
+    }
+    Ok(exit)
+}
+
+fn cmd_operations_recover(ctx: &Ctx, args: OperationIdArgs) -> CliResult<u8> {
+    let report = api_call(
+        ApiContext::Recover,
+        ctx.hub.recover_operation(&args.id),
+    )?;
+    let exit = match report.status.as_str() {
+        "recovered" => EXIT_OK,
+        "needs_manual_recovery" => EXIT_RUNTIME,
+        _ => EXIT_PARTIAL,
+    };
+    ctx.emit_api_success(&report)?;
+    if !ctx.json {
+        println!(
+            "Recovery {}  status={}",
+            short_id(&report.operation_id),
+            report.status
+        );
+        for item in &report.items {
+            println!(
+                "  {:<8} target={} {}",
+                item.status, item.target_path, item.message
+            );
+        }
+        for diagnostic in &report.diagnostics {
+            println!("  diagnostic: {diagnostic}");
+        }
+    }
+    Ok(exit)
 }
 
 fn cmd_profiles_list(ctx: &Ctx) -> CliResult<u8> {

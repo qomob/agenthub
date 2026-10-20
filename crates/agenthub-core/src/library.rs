@@ -157,6 +157,9 @@ impl Library {
                 blocked: 0,
             },
             created_at: created_at.clone(),
+            plan_hash: String::new(),
+            expires_at: String::new(),
+            approval_state: "none".to_string(),
         };
         let op_id = util::new_id();
         let mut plan = plan;

@@ -257,6 +257,100 @@ CREATE TABLE agent_versions (
 CREATE INDEX idx_agent_versions_agent ON agent_versions(agent_id, detected_at DESC);
 "#;
 
+/// v3.1 Phase 1 safety baseline (additive; existing v1/v2 tables are kept).
+/// Adds the approval/journal/evidence/audit primitives required by
+/// F-02/F-06/F-07 without rewriting the 0.4.0 registry tables.
+const SCHEMA_V3: &str = r#"
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  version INTEGER PRIMARY KEY,
+  checksum TEXT NOT NULL DEFAULT '',
+  applied_at TEXT NOT NULL
+);
+INSERT OR IGNORE INTO schema_migrations(version, checksum, applied_at)
+  VALUES (1, 'legacy-v1', datetime('now')), (2, 'legacy-v2', datetime('now'));
+
+CREATE TABLE IF NOT EXISTS operation_steps (
+  id TEXT PRIMARY KEY,
+  operation_id TEXT NOT NULL REFERENCES operations(id) ON DELETE CASCADE,
+  sequence_no INTEGER NOT NULL,
+  target_path TEXT NOT NULL,
+  before_hash TEXT,
+  after_hash TEXT,
+  snapshot_ref TEXT,
+  state TEXT NOT NULL CHECK (state IN ('pending','applying','applied','failed','skipped','recovered','blocked')),
+  error_code TEXT,
+  started_at TEXT NOT NULL,
+  finished_at TEXT,
+  UNIQUE (operation_id, sequence_no)
+);
+CREATE INDEX IF NOT EXISTS idx_operation_steps_op ON operation_steps(operation_id, sequence_no);
+
+CREATE TABLE IF NOT EXISTS adapter_evidence (
+  id TEXT PRIMARY KEY,
+  agent_key TEXT NOT NULL,
+  feature_key TEXT NOT NULL,
+  support_state TEXT NOT NULL CHECK (support_state IN
+    ('verified_runtime','verified_config','documented','community','assumed',
+     'unsupported','manual','unverified')),
+  evidence_level TEXT NOT NULL,
+  source_url TEXT,
+  tested_at TEXT,
+  agent_version TEXT,
+  adapter_version TEXT NOT NULL,
+  notes TEXT,
+  UNIQUE (agent_key, feature_key, adapter_version)
+);
+CREATE INDEX IF NOT EXISTS idx_adapter_evidence_agent ON adapter_evidence(agent_key, feature_key);
+
+CREATE TABLE IF NOT EXISTS audit_events (
+  id TEXT PRIMARY KEY,
+  actor TEXT NOT NULL,
+  event_key TEXT NOT NULL,
+  operation_id TEXT REFERENCES operations(id),
+  event_json_redacted TEXT NOT NULL,
+  occurred_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_audit_events_time ON audit_events(occurred_at);
+
+INSERT OR IGNORE INTO schema_migrations(version, checksum, applied_at)
+  VALUES (3, 'v31-safety-v1', datetime('now'));
+"#;
+
+/// `operations` columns added by v3. `ALTER TABLE ADD COLUMN` is not
+/// idempotent, so each is applied only when absent (supports downgrade tests
+/// and interrupted migrations).
+const V3_OPERATION_COLUMNS: &[(&str, &str)] = &[
+    ("plan_hash", "ALTER TABLE operations ADD COLUMN plan_hash TEXT"),
+    (
+        "approval_token_hash",
+        "ALTER TABLE operations ADD COLUMN approval_token_hash TEXT",
+    ),
+    (
+        "approval_expires_at",
+        "ALTER TABLE operations ADD COLUMN approval_expires_at TEXT",
+    ),
+    (
+        "approved_by",
+        "ALTER TABLE operations ADD COLUMN approved_by TEXT",
+    ),
+    (
+        "approved_at",
+        "ALTER TABLE operations ADD COLUMN approved_at TEXT",
+    ),
+    (
+        "idempotency_key",
+        "ALTER TABLE operations ADD COLUMN idempotency_key TEXT",
+    ),
+    (
+        "recovery_state",
+        "ALTER TABLE operations ADD COLUMN recovery_state TEXT",
+    ),
+    (
+        "approval_state",
+        "ALTER TABLE operations ADD COLUMN approval_state TEXT NOT NULL DEFAULT 'none'",
+    ),
+];
+
 // ---------------------------------------------------------------------------
 // Internal row structs
 // ---------------------------------------------------------------------------
@@ -357,6 +451,28 @@ pub struct OperationRow {
     pub rollback_of: Option<String>,
     pub started_at: String,
     pub finished_at: Option<String>,
+    pub plan_hash: Option<String>,
+    pub approval_token_hash: Option<String>,
+    pub approval_expires_at: Option<String>,
+    pub approved_by: Option<String>,
+    pub approved_at: Option<String>,
+    pub idempotency_key: Option<String>,
+    pub recovery_state: Option<String>,
+    pub approval_state: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct AdapterEvidenceRow {
+    pub id: String,
+    pub agent_key: String,
+    pub feature_key: String,
+    pub support_state: String,
+    pub evidence_level: String,
+    pub source_url: Option<String>,
+    pub tested_at: Option<String>,
+    pub agent_version: Option<String>,
+    pub adapter_version: String,
+    pub notes: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -526,7 +642,111 @@ impl Database {
             tx.pragma_update(None, "user_version", 2)?;
             tx.commit()?;
         }
+        let version: i64 = self
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if version < 3 {
+            // v3.1 rule: migration must be preceded by a recoverable DB copy.
+            self.backup_before_migration(version)?;
+            let tx = self.conn.unchecked_transaction()?;
+            tx.execute_batch(SCHEMA_V3)?;
+            for (column, ddl) in V3_OPERATION_COLUMNS {
+                let exists = tx
+                    .prepare("PRAGMA table_info(operations)")?
+                    .query_map([], |row| row.get::<_, String>(1))?
+                    .flatten()
+                    .any(|name| name == *column);
+                if !exists {
+                    tx.execute_batch(ddl)?;
+                }
+            }
+            tx.pragma_update(None, "user_version", 3)?;
+            tx.commit()?;
+            let integrity = self.integrity_check()?;
+            if !integrity.ok {
+                return Err(Error::Verification(format!(
+                    "database integrity check failed after v3 migration: {}",
+                    integrity.details.join("; ")
+                )));
+            }
+        }
         Ok(())
+    }
+
+    /// Best-effort but mandatory-before-migration snapshot. The backup lives in
+    /// `<data>/backups/pre-migration-v<from>-<timestamp>/` and includes a
+    /// manifest with the source/target schema version and sha256.
+    fn backup_before_migration(&self, from_version: i64) -> Result<PathBuf> {
+        if self.path == Path::new(":memory:") {
+            return Ok(PathBuf::new());
+        }
+        let parent = self
+            .path
+            .parent()
+            .ok_or_else(|| Error::msg("database path has no parent directory"))?;
+        let unique = crate::util::new_id();
+        let dir = parent.join("backups").join(format!(
+            "pre-migration-v{}-{}-{}",
+            from_version,
+            crate::util::now_for_path(),
+            &unique[..8]
+        ));
+        std::fs::create_dir_all(&dir)?;
+        let target = dir.join("agenthub.db");
+        let sql = format!(
+            "VACUUM INTO '{}'",
+            target.to_string_lossy().replace('\'', "''")
+        );
+        self.conn.execute_batch(&sql)?;
+        let sha256 = crate::util::hash_file(&target)?;
+        let manifest = serde_json::json!({
+            "kind": "pre-migration-backup",
+            "from_version": from_version,
+            "to_version": 3,
+            "created_at": crate::util::now(),
+            "database": target.to_string_lossy(),
+            "sha256": sha256,
+            "app_version": env!("CARGO_PKG_VERSION"),
+        });
+        std::fs::write(
+            dir.join("manifest.json"),
+            serde_json::to_string_pretty(&manifest)?,
+        )?;
+        Ok(dir)
+    }
+
+    /// `PRAGMA integrity_check` + `PRAGMA foreign_key_check`.
+    pub fn integrity_check(&self) -> Result<IntegrityReport> {
+        let mut details = Vec::new();
+        let mut ok = true;
+        let integrity: String =
+            self.conn
+                .query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+        if integrity != "ok" {
+            ok = false;
+            details.push(format!("integrity_check: {integrity}"));
+        }
+        let mut stmt = self.conn.prepare("PRAGMA foreign_key_check")?;
+        let rows = stmt.query_map([], |row| {
+            Ok(format!(
+                "table={} rowid={:?} parent={}",
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, String>(2)?
+            ))
+        })?;
+        for row in rows {
+            ok = false;
+            details.push(format!("foreign_key_check: {}", row?));
+        }
+        let schema_version: i64 =
+            self.conn
+                .query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        Ok(IntegrityReport {
+            ok,
+            schema_version,
+            details,
+        })
     }
 
     // -- settings ----------------------------------------------------------
@@ -1299,8 +1519,18 @@ impl Database {
             rollback_of: row.get(9)?,
             started_at: row.get(10)?,
             finished_at: row.get(11)?,
+            plan_hash: row.get(12)?,
+            approval_token_hash: row.get(13)?,
+            approval_expires_at: row.get(14)?,
+            approved_by: row.get(15)?,
+            approved_at: row.get(16)?,
+            idempotency_key: row.get(17)?,
+            recovery_state: row.get(18)?,
+            approval_state: row.get(19)?,
         })
     }
+
+    const OPERATION_COLUMNS: &'static str = "id, kind, status, dry_run, actor, summary, plan, result, error, rollback_of, started_at, finished_at, plan_hash, approval_token_hash, approval_expires_at, approved_by, approved_at, idempotency_key, recovery_state, approval_state";
 
     pub fn insert_operation(
         &self,
@@ -1334,28 +1564,241 @@ impl Database {
     }
 
     pub fn get_operation(&self, id: &str) -> Result<Option<OperationRow>> {
+        let sql = format!(
+            "SELECT {} FROM operations WHERE id = ?1",
+            Self::OPERATION_COLUMNS
+        );
         Ok(self
             .conn
-            .query_row(
-                "SELECT id, kind, status, dry_run, actor, summary, plan, result, error, rollback_of, started_at, finished_at
-                 FROM operations WHERE id = ?1",
-                params![id],
-                Self::operation_from_row,
-            )
+            .query_row(&sql, params![id], Self::operation_from_row)
             .optional()?)
     }
 
     pub fn list_operations(&self, limit: usize) -> Result<Vec<OperationRow>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, kind, status, dry_run, actor, summary, plan, result, error, rollback_of, started_at, finished_at
-             FROM operations ORDER BY started_at DESC LIMIT ?1",
-        )?;
+        let sql = format!(
+            "SELECT {} FROM operations ORDER BY started_at DESC LIMIT ?1",
+            Self::OPERATION_COLUMNS
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params![limit as i64], Self::operation_from_row)?;
         let mut out = Vec::new();
         for row in rows {
             out.push(row?);
         }
         Ok(out)
+    }
+
+    /// Persist the semantic plan hash and approval deadline on creation.
+    pub fn set_operation_plan_meta(
+        &self,
+        id: &str,
+        plan_hash: &str,
+        expires_at: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE operations SET plan_hash = ?2, approval_expires_at = ?3 WHERE id = ?1",
+            params![id, plan_hash, expires_at],
+        )?;
+        Ok(())
+    }
+
+    /// Store a hashed one-time approval token. The clear-text token is never
+    /// written to the database or to logs.
+    pub fn set_operation_approval(
+        &self,
+        id: &str,
+        token_hash: &str,
+        approved_by: &str,
+        approved_at: &str,
+        expires_at: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE operations SET approval_token_hash = ?2, approved_by = ?3,
+             approved_at = ?4, approval_expires_at = ?5, approval_state = 'approved'
+             WHERE id = ?1",
+            params![id, token_hash, approved_by, approved_at, expires_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_operation_state(
+        &self,
+        id: &str,
+        status: &str,
+        recovery_state: Option<&str>,
+        idempotency_key: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE operations SET status = ?2,
+             recovery_state = COALESCE(?3, recovery_state),
+             idempotency_key = COALESCE(?4, idempotency_key)
+             WHERE id = ?1",
+            params![id, status, recovery_state, idempotency_key],
+        )?;
+        Ok(())
+    }
+
+    pub fn find_operation_by_idempotency(&self, key: &str) -> Result<Option<OperationRow>> {
+        let sql = format!(
+            "SELECT {} FROM operations WHERE idempotency_key = ?1 ORDER BY started_at DESC LIMIT 1",
+            Self::OPERATION_COLUMNS
+        );
+        Ok(self
+            .conn
+            .query_row(&sql, params![key], Self::operation_from_row)
+            .optional()?)
+    }
+
+    // -- operation journal ------------------------------------------------
+
+    pub fn insert_operation_step(
+        &self,
+        operation_id: &str,
+        sequence_no: i64,
+        target_path: &str,
+        before_hash: Option<&str>,
+        state: &str,
+    ) -> Result<String> {
+        let id = crate::util::new_id();
+        self.conn.execute(
+            "INSERT INTO operation_steps
+             (id, operation_id, sequence_no, target_path, before_hash, state, started_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                id,
+                operation_id,
+                sequence_no,
+                target_path,
+                before_hash,
+                state,
+                crate::util::now()
+            ],
+        )?;
+        Ok(id)
+    }
+
+    pub fn finish_operation_step(
+        &self,
+        id: &str,
+        after_hash: Option<&str>,
+        snapshot_ref: Option<&str>,
+        state: &str,
+        error_code: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE operation_steps SET after_hash = ?2, snapshot_ref = ?3, state = ?4,
+             error_code = ?5, finished_at = ?6 WHERE id = ?1",
+            params![id, after_hash, snapshot_ref, state, error_code, crate::util::now()],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_operation_steps(&self, operation_id: &str) -> Result<Vec<OperationStepView>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, operation_id, sequence_no, target_path, before_hash, after_hash,
+                    snapshot_ref, state, error_code, started_at, finished_at
+             FROM operation_steps WHERE operation_id = ?1 ORDER BY sequence_no",
+        )?;
+        let rows = stmt.query_map(params![operation_id], |row| {
+            Ok(OperationStepView {
+                id: row.get(0)?,
+                operation_id: row.get(1)?,
+                sequence_no: row.get(2)?,
+                target_path: row.get(3)?,
+                before_hash: row.get(4)?,
+                after_hash: row.get(5)?,
+                snapshot_ref: row.get(6)?,
+                state: row.get(7)?,
+                error_code: row.get(8)?,
+                started_at: row.get(9)?,
+                finished_at: row.get(10)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    // -- adapter evidence -------------------------------------------------
+
+    pub fn upsert_adapter_evidence(&self, row: &AdapterEvidenceRow) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO adapter_evidence
+             (id, agent_key, feature_key, support_state, evidence_level, source_url,
+              tested_at, agent_version, adapter_version, notes)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(agent_key, feature_key, adapter_version) DO UPDATE SET
+               support_state = excluded.support_state,
+               evidence_level = excluded.evidence_level,
+               source_url = excluded.source_url,
+               tested_at = excluded.tested_at,
+               agent_version = excluded.agent_version,
+               notes = excluded.notes",
+            params![
+                row.id,
+                row.agent_key,
+                row.feature_key,
+                row.support_state,
+                row.evidence_level,
+                row.source_url,
+                row.tested_at,
+                row.agent_version,
+                row.adapter_version,
+                row.notes
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_adapter_evidence(&self, agent_key: &str) -> Result<Vec<AdapterEvidenceView>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, agent_key, feature_key, support_state, evidence_level, source_url,
+                    tested_at, agent_version, adapter_version, notes
+             FROM adapter_evidence WHERE agent_key = ?1 ORDER BY feature_key",
+        )?;
+        let rows = stmt.query_map(params![agent_key], |row| {
+            Ok(AdapterEvidenceView {
+                id: row.get(0)?,
+                agent_key: row.get(1)?,
+                feature_key: row.get(2)?,
+                support_state: row.get(3)?,
+                evidence_level: row.get(4)?,
+                source_url: row.get(5)?,
+                tested_at: row.get(6)?,
+                agent_version: row.get(7)?,
+                adapter_version: row.get(8)?,
+                notes: row.get(9)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    pub fn insert_audit_event(
+        &self,
+        actor: &str,
+        event_key: &str,
+        operation_id: Option<&str>,
+        detail: &serde_json::Value,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO audit_events (id, actor, event_key, operation_id, event_json_redacted, occurred_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                crate::util::new_id(),
+                actor,
+                event_key,
+                operation_id,
+                detail.to_string(),
+                crate::util::now()
+            ],
+        )?;
+        Ok(())
     }
 
     // -- snapshots ---------------------------------------------------------

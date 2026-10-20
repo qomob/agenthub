@@ -124,6 +124,9 @@ function plan(actions: PlanItem['action'][]): OperationPlan {
     requiresConfirmation: false,
     summary: countPlanActions(items),
     createdAt: '2026-10-20T00:00:00Z',
+    planHash: 'a'.repeat(64),
+    expiresAt: '2026-10-20T00:15:00Z',
+    approvalState: 'none',
   }
 }
 

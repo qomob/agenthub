@@ -147,6 +147,10 @@ pub enum OperationStatus {
     Partial,
     Failed,
     RolledBack,
+    /// v3.1: an external modification prevented automatic compensation.
+    NeedsManualRecovery,
+    /// v3.1: a recovery run restored the affected targets.
+    Recovered,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -710,6 +714,19 @@ pub struct OperationPlan {
     pub requires_confirmation: bool,
     pub summary: PlanSummary,
     pub created_at: String,
+    /// v3.1: SHA-256 of the canonical plan payload. Approval is bound to it.
+    #[serde(default)]
+    pub plan_hash: String,
+    /// v3.1: ISO timestamp after which an approval must be re-issued.
+    #[serde(default)]
+    pub expires_at: String,
+    /// v3.1: `none` / `approved` / `expired`.
+    #[serde(default = "default_approval_state")]
+    pub approval_state: String,
+}
+
+fn default_approval_state() -> String {
+    "none".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -751,6 +768,94 @@ pub struct OperationView {
     pub plan: Option<OperationPlan>,
     pub result: Option<OperationResult>,
     pub can_rollback: bool,
+    /// v3.1 approval surface.
+    #[serde(default)]
+    pub plan_hash: Option<String>,
+    #[serde(default)]
+    pub expires_at: Option<String>,
+    #[serde(default)]
+    pub approval_state: String,
+    #[serde(default)]
+    pub approved_at: Option<String>,
+    #[serde(default)]
+    pub recovery_state: Option<String>,
+    #[serde(default)]
+    pub steps: Vec<OperationStepView>,
+}
+
+/// `PRAGMA integrity_check` + `foreign_key_check` result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IntegrityReport {
+    pub ok: bool,
+    pub schema_version: i64,
+    pub details: Vec<String>,
+}
+
+/// A single durable journal entry for a target touched by an operation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperationStepView {
+    pub id: String,
+    pub operation_id: String,
+    pub sequence_no: i64,
+    pub target_path: String,
+    pub before_hash: Option<String>,
+    pub after_hash: Option<String>,
+    pub snapshot_ref: Option<String>,
+    pub state: String,
+    pub error_code: Option<String>,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+}
+
+/// One-time approval grant returned by `operations_approve`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalGrant {
+    pub operation_id: String,
+    pub plan_hash: String,
+    pub approval_token: String,
+    pub approved_at: String,
+    pub expires_at: String,
+}
+
+/// v3.1 per-agent feature evidence. `support_state` and `evidence_level` are
+/// deliberately separate: support answers "is it possible" while evidence
+/// answers "how strongly do we know".
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdapterEvidenceView {
+    pub id: String,
+    pub agent_key: String,
+    pub feature_key: String,
+    pub support_state: String,
+    pub evidence_level: String,
+    pub source_url: Option<String>,
+    pub tested_at: Option<String>,
+    pub agent_version: Option<String>,
+    pub adapter_version: String,
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentInspection {
+    pub agent_id: String,
+    pub agent_key: String,
+    pub capabilities: Vec<AdapterEvidenceView>,
+    pub inspected_at: String,
+}
+
+/// Result of `operations_recover`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryReport {
+    pub operation_id: String,
+    pub status: String,
+    pub items: Vec<ItemResult>,
+    pub diagnostics: Vec<String>,
+    pub finished_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -907,6 +1012,8 @@ impl OperationStatus {
             OperationStatus::Partial => "partial",
             OperationStatus::Failed => "failed",
             OperationStatus::RolledBack => "rolled_back",
+            OperationStatus::NeedsManualRecovery => "needs_manual_recovery",
+            OperationStatus::Recovered => "recovered",
         }
     }
 
@@ -917,6 +1024,8 @@ impl OperationStatus {
             "success" => OperationStatus::Success,
             "partial" => OperationStatus::Partial,
             "rolled_back" => OperationStatus::RolledBack,
+            "needs_manual_recovery" => OperationStatus::NeedsManualRecovery,
+            "recovered" => OperationStatus::Recovered,
             _ => OperationStatus::Failed,
         }
     }

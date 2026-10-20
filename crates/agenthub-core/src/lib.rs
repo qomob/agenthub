@@ -6,6 +6,7 @@
 pub mod adapters;
 pub mod agent_health;
 pub mod audit;
+pub mod contract;
 pub mod db;
 pub mod deps;
 pub mod impact;
