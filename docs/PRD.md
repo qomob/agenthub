@@ -1,15 +1,15 @@
 # AgentHub 产品需求文档（PRD）
 
-> 版本：0.1（MVP）
+> 版本：0.2（Capability Control Center）
 > 日期：2026-10-20
-> 状态基准：以当前代码为准。**「已实现」不等于「已验收」**；本文在每个功能后区分「代码已实现 / 未验证 / 未实现」。
+> 状态基准：以当前代码与实测为准。**「已实现」不等于「已验收」「已验证」**；本文在每个功能后区分「代码已实现 / 未验证 / 未实现」。
 > 关联：[ARCHITECTURE.md](ARCHITECTURE.md)、[ADAPTER-SPEC.md](ADAPTER-SPEC.md)、[TEST-PLAN.md](TEST-PLAN.md)、[AGENT-COMPATIBILITY.md](AGENT-COMPATIBILITY.md)
 
 ---
 
 ## 1. 产品定位
 
-**一句话**：AgentHub 是 macOS 上的本地多 Agent 能力管理中心——把散落在 Codex、TRAE、ZCode、WorkBuddy、DSH 等 Agent 目录里的 Skills、MCP 配置和插件清单集中登记，并通过适配器与事务化写入分发到指定 Agent，出错可一键回滚。
+**一句话**：AgentHub 是 macOS 上的本地 **Agent 能力控制中心（Capability Control Center）**——集中登记散落在 Codex、TRAE、ZCode、WorkBuddy、DSH 等 Agent 目录里的 Skills、MCP 配置和插件清单，事务化分发并回滚，同时用静态审计、依赖诊断、更新影响、人工验证证据与 Agent 版本健康回答「能不能用、安不安全、更新后会不会坏」。
 
 **形态**：Tauri 2 桌面应用（Rust 核心 + Vue 3 UI），纯本地、无账号、无云端；同一 Rust 核心同时服务 GUI 与 CLI。
 
@@ -17,6 +17,7 @@
 
 - 不是 Skill 市场（不提供下载源、不做排行/推荐）；
 - 不是 Agent 运行时（不执行 skill 里的脚本、不启动 MCP server）；
+- 不是自动安全认证服务（静态审计是规则引擎，不是完备安全证明）；
 - 不是云同步工具（MVP 不做多设备、不做 Git 备份）；
 - 不是通用文件同步器（只管理白名单内、有适配器证据的路径）。
 
@@ -41,6 +42,10 @@ MVP **不面向**团队协作、企业管控、非 macOS 平台。
 3. **格式不统一**：MCP 至少有 `mcpServers` JSON、`mcp.servers` JSON、`[mcp_servers]` TOML、Cordis YAML 四种；直接复制会写坏目标配置。
 4. **没有事实记录**：文件系统只能回答「有没有」，不能回答「是谁装的、装的哪个版本、有没有被外部改过」。
 5. **安全边界模糊**：第三方 skill 可能带脚本/`allowed-tools`/动态命令注入；MCP 的 stdio 条目等价于任意命令执行。
+6. **安装 ≠ 可用**：文件复制成功不代表运行时存在、依赖齐全、Agent 能触发该 skill。
+7. **依赖未就绪**：skill 的脚本依赖 `python3`/`node`/包，本机缺失时只有真正运行时才暴露。
+8. **更新影响未知**：新版本可能新增脚本、网络访问、依赖或权限；更新前无法判断是否需要重新验证。
+9. **「验证过」不可追溯**：口头/记忆中的验证无法绑定到具体版本与 Agent，Agent 升级后也无法感知。
 
 ---
 
@@ -57,6 +62,7 @@ MVP **不面向**团队协作、企业管控、非 macOS 平台。
 | 5 | **Capability-based** | 适配器显式声明能力等级（symlink/插件/传输/格式）；未验证能力不得声称可用 | `SymlinkSupport`/`PluginSupport`/`AgentStatus` | 部分（DSH symlink 声明与证据不一致） |
 | 6 | **Transactional** | 一次操作要么全部成功，要么逆序补偿；失败不留半配置 | `ops::Executor` saga + 快照 + rollback | 已验证（Skill）；MCP 执行路径有缺陷 |
 | 7 | **No Fake Integration** | 没有真实证据/真实实现的集成不展示、不写入；未验证项明确标注 | ChatGPT 只检测不写；DSH MCP 不声明；Claude/Cursor 标 VerificationRequired | 已验证 |
+| 8 | **Verified, not assumed** | 安装 ≠ 可用 ≠ 已验证；只有审计/环境/人工证据支持的当前版本才是 `verified` | `validation::derive_health`；安全优先；旧版本证据失效 | 已验证（单测 + 真实 Mac） |
 
 ---
 
@@ -194,6 +200,53 @@ MVP **不面向**团队协作、企业管控、非 macOS 平台。
 
 ---
 
+### H. Capability Validator（静态审计 / 依赖 / 更新影响）
+
+**需求**：在不执行 skill 脚本、不联网、无 AI 评分的前提下，给出确定性、可解释的安全与可用性证据。
+
+| 子项 | 状态 | 说明 |
+|---|---|---|
+| 静态规则审计 | ✅ | `audit.rs`：spec/security/quality/dependency 规则；finding id/severity/category/path/suggestion；输出 pass/warn/fail 与 low..critical |
+| 脚本高危模式 | ✅ | `curl|sh`、`wget|sh`、`sudo`、`rm -rf /`、`eval`、`base64 -d`、`os.system`、`subprocess shell=True`、SSH/AWS/私钥/Keychain 访问等 |
+| 硬编码密钥 | ✅ | 检测类型/行号；**原值脱敏**，不写入 finding/operations/logs |
+| 网络与外泄风险 | ✅ | 远程域名清单、网络+敏感数据组合告警 |
+| 权限/缺失引用/symlink 逃逸/依赖清单 | ✅ | world-writable、缺失相对引用、逃逸 symlink、有脚本无 manifest |
+| 依赖与环境诊断 | ✅ | shebang runtime 真实 `--version`（2s 超时）+ requirements/pyproject/package.json；MCP/凭据 unknown |
+| 更新影响分析 | ✅ | 文件 diff（最多 500 条 + 真实总数）、classes、风险、requiresRevalidation；写入 `update_impacts`，进入 plan warnings |
+| 不做 | ⛔ | 不执行脚本、不联网、不装依赖、不自动修复、不做 AI 评分 |
+
+**验收**：审计有稳定 rule id 和可复现排序；密钥不出现在 finding/操作/日志；缺 runtime → deps needs_attention；更新加入脚本/网络/依赖 → requiresRevalidation=true 且 plan 有 warning。
+
+### I. Agent Health Monitor
+
+**需求**：真实记录 Agent 版本与路径健康，首次观测为 baseline，版本变化提示重新扫描/验证。
+
+| 子项 | 状态 | 说明 |
+|---|---|---|
+| `.app` 版本读取 | ✅ | `CFBundleShortVersionString`：`plutil` → XML 解析 → `mdls` 兜底；不猜测 |
+| CLI 版本读取 | ✅ | PATH + `/opt/homebrew/bin` + `/usr/local/bin`；`--version` 2s 超时；DSH fallback |
+| baseline / changed | ✅ | 首次观测 `changed=false`；后续版本不同 → `changed=true` + 提示 |
+| 同秒排序 | ✅ | `detected_at DESC, rowid DESC`；QA 发现的 same-second bug 已修复并有回归测试 |
+| 路径健康 | ✅ | `paths_ok`（skill root 或 MCP target 存在）；无 root 时提示 |
+| 各 Agent 支持 | ✅ | 真实 Mac：ChatGPT/Codex/DSH/TRAE CN/WorkBuddy/ZCode 有版本；TRAE 国际/Claude/Cursor 无稳定来源（不伪造） |
+
+**验收**：真实 Mac 能读出 6 个 Agent 版本；首次全部 baseline；版本变化可观测；无版本时显示未知而不是假值。
+
+### J. Validation Evidence 与健康状态机
+
+**需求**：记录真实人工验证证据；健康状态由审计/环境/证据/版本共同推导；安装≠验证。
+
+| 子项 | 状态 | 说明 |
+|---|---|---|
+| 验证记录 | ✅ | `validation_runs`：agent/case/status/notes/evidence/kind/actor/version |
+| 人工证据语义 | ✅ | `kind=manual & passed` 才可贡献 verified；明确不是自动通过；封闭 Agent 无法自动 E2E |
+| 状态机 | ✅ | NotDeployed / Failed / NeedsAttention / Verified / Unverified；安全优先；旧版本证据失效 |
+| 提交校验 | ✅ | case 必填；status/kind 白名单；agent 必须存在；版本必须属于该 capability |
+| 审计 | ✅ | `capability.validation` 写入 JSONL 审计（不含 notes/evidence 内容） |
+| 不做 | ⛔ | 不自动判定通过、不做运行时执行、不对 evidence 真实性做证明 |
+
+**验收**：未部署 → not_deployed；仅有安装 → unverified；audit fail + manual passed → needs_attention；当前版本全部安装 Agent manual passed → verified；旧版本 failed 不影响当前版本。
+
 ## 5. MVP 边界（明确不在范围）
 
 | 不做 | 理由 |
@@ -209,7 +262,10 @@ MVP **不面向**团队协作、企业管控、非 macOS 平台。
 | 自动更新应用 / 自动更新 skill | 无签名与更新通道 |
 | 编辑 SKILL.md / 删除库版本 | MVP 只做导入与部署；避免内容编辑器复杂度 |
 | 执行 skill 脚本 / 运行 MCP | 安全边界之外 |
-| 完整 i18n 文案 | 设置支持 zh/en/system，但 UI 未落地 |
+| AI 安全评分 / 自动判定通过 | 静态审计是确定性规则；不做不可解释的评分，也不把自动结果当验证 |
+| 自动端到端测试封闭 Agent | 封闭桌面 Agent 无测试接口；只能记录人工证据（明确标注不是自动通过） |
+| 运行时沙箱 / 依赖自动安装 | 验证平台只诊断，不执行/不安装 |
+| 完整 i18n 文案 | zh/en 页面文案已基本齐全，仍可能有遗漏 |
 
 ---
 
@@ -282,7 +338,16 @@ CLI 验收时加 `--home /tmp/agenthub-accept/home`（等价于 `AGENTHUB_HOME`�
 ### 场景 6（可选）：MCP 计划
 
 - 调用 Tauri 命令 `mcp_upsert` 创建 stdio server（CLI 无创建命令），再 `agenthub mcp distribute <name> --agents codex --dry-run` 生成计划。
-- 预期：计划可生成；`--yes` 在已有配置文件上会报 `ExternalModification`，加 `--force` 才会写入。写入后应验证：无关 TOML 段/注释保留、第二个 server 不覆盖第一个、`operations` 记录 success、MCP 安装行落库。
+- 预期：计划可生成；已有配置文件时 preflight 按**条目 hash** 比较，无需 `--force`（只有真实外部修改/冲突才需要确认）。写入后应验证：无关 TOML 段/注释保留、第二个 server 不覆盖第一个、`operations` 记录 success、MCP 安装行落库。
+
+### 场景 7：验证平台（第二轮）
+
+1. `agenthub health` → 能力健康概览；未部署技能为 `not_deployed`。
+2. `agenthub skills audit <slug>` → finding/status/risk；`fail` 退出码 2。
+3. `agenthub skills deps <slug>` → runtime/manifest 检查；`needs_attention` 退出码 2；MCP 为 unknown。
+4. 导入 v2 → `agenthub skills impact <slug> --to <v2>` → classes/风险/`requiresRevalidation`；分发预览 warnings 含 impact。
+5. `agenthub skills validate <slug> --agent codex --case <case> --status passed` → 记录证据；`agenthub health` 中该能力仍按安装/审计/依赖推导（未部署时不会变 verified）。
+6. `agenthub health --agents --record` → Agent 版本首次 baseline；再次版本变化时 `changed=true` 并提示重新扫描/验证。
 
 ---
 
@@ -293,8 +358,10 @@ CLI 验收时加 `--home /tmp/agenthub-accept/home`（等价于 `AGENTHUB_HOME`�
 | 覆盖 | 至少 3 个本机 Agent 可检测、可读、可分发 | 代码支持 9 个；本机证据覆盖 6 个 |
 | 安全 | 不覆盖非托管目标；任何失败可恢复；不读取凭据文件内容 | 代码具备；MCP env 计划已脱敏；真实 Mac 验收未覆盖失败注入 |
 | 可解释 | 每次操作有计划、结果、快照、错误原因 | 具备（缺 import/scan 记录） |
-| 可用 | GUI 完成「扫描 → 导入 → 分发 → 更新 → 回滚」 | **已达成（人工验收）**：真实 Mac CLI 全流程 + 隔离 home GUI Dashboard/onboarding；自动化 GUI 回归待补 |
-| 诚实 | 未实现/未验证能力在 UI 与文档中明确标注 | 文档已标注；UI 待实现 |
+| 可用 | GUI 完成「扫描 → 导入 → 分发 → 更新 → 回滚」 | **已达成（人工验收）**：真实 Mac CLI 全流程 + 隔离 home GUI；自动化 GUI 回归待补 |
+| 可验证 | 安装 ≠ 可用；有审计/依赖/人工证据/版本健康 | **已达成**：DB v2 + `/health` 页 + SkillDetail 四区块 + CLI；真实 Mac validator 验收通过 |
+| 可解释 | 每个 finding 有 rule id/severity/category/path/suggestion；每个 health 有 reasons | 已实现（见 VALIDATION.md） |
+| 诚实 | 未实现/未验证能力在 UI 与文档中明确标注；人工证据不冒充自动通过 | 文档与 UI 文案已标注；规则引擎/人工证据限制已公开 |
 
 ---
 
@@ -308,9 +375,13 @@ CLI 验收时加 `--home /tmp/agenthub-accept/home`（等价于 `AGENTHUB_HOME`�
 | Adapter 证据漂移 | 私有格式变化导致写入无效 | 文档标注证据日期；codec 独立测试 |
 | DSH symlink 声明与证据不一致 | 默认 copy，浪费已验证能力 | 证据复核后改 `Supported` |
 | Keychain 授权 | `security` CLI 首次可能弹授权/拒绝 | 诊断页显示 `keychainAvailable`；失败给出提示 |
+| 静态审计误报/漏报 | 规则引擎无法覆盖所有恶意模式 | 明确「启发式、非完备安全证明」；保留 finding 可解释性；后续规则演进 |
+| 人工证据可信度 | evidence/notes 是用户输入，可被夸大/伪造 | UI 明确「人工证据不是自动通过」；不据此做安全认证；后续可加 hash/附件 |
+| Agent 版本探测失败 | 非标准 bundle/CLI 可能无版本 | 显示未知，不猜测；首次 baseline 不算变更 |
+| same-second 版本排序 | 同一秒多次观测可能取错行 | 已修复：`detected_at DESC, rowid DESC` + 回归测试 |
 
 ## 9. 已验证 / 未验证 / 已知限制
 
-- **已验证**：真实 Mac 验收（导入/分发/扫描 inSync/更新/回滚/卸载/备份/doctor）；GUI（隔离 home）运行验收；core 21 + CLI 9 + 前端 21 测试、`pnpm build`、`pnpm tauri build --bundles app`。
+- **已验证**：真实 Mac 安装/分发/更新/回滚验收；GUI（隔离 home）运行验收；真实 Mac validator 验收（DB v1→v2、真实 Agent 版本、audit/deps/impact/validate）；core 76 + CLI 16 = 92 个 Rust 测试、前端 29 个测试、`pnpm build`、完整 `pnpm tauri build`。
 - **未验证**：签名/公证（DMG 已产出）、GUI 自动化、真实 Keychain 正向写入、真实 MCP 配置写入、并发/中断、Windows/Linux、部分 adapter 路径与 symlink 行为。
-- **已知限制**：插件只读、不试连 MCP、无云同步/市场；扫描不写 operations；备份恢复未实现；MCP headers 明文；`VerificationRequired` 仍允许安装；详见 §8 与 [SECURITY.md](SECURITY.md)。
+- **已知限制**：静态审计是启发式规则非完备证明；MCP/凭据静态 unknown；封闭 Agent 只能人工证据且证据为用户输入；版本探测依赖 app bundle/CLI；插件只读、不试连 MCP；备份恢复未实现；MCP headers 明文；详见 §8、[VALIDATION.md](VALIDATION.md) 与 [SECURITY.md](SECURITY.md)。

@@ -5,15 +5,16 @@ import { useRoute, useRouter } from 'vue-router'
 
 import DataTable from '../components/DataTable.vue'
 import EmptyState from '../components/EmptyState.vue'
+import HealthStatusBadge from '../components/HealthStatusBadge.vue'
 import ErrorBanner from '../components/ErrorBanner.vue'
 import Icon from '../components/Icon.vue'
 import LoadingState from '../components/LoadingState.vue'
 import PageHeader from '../components/PageHeader.vue'
 import SkillImportDialog from '../components/SkillImportDialog.vue'
 import StatusBadge from '../components/StatusBadge.vue'
-import { normalizeError } from '../lib/api'
+import { api, normalizeError } from '../lib/api'
 import { formatBytes, formatDateTime, formatRelativeTime } from '../lib/format'
-import type { Skill } from '../lib/types'
+import type { CapabilityHealth, HealthOverview, Skill } from '../lib/types'
 import { useAppStore } from '../stores/app'
 import { useSkillsStore } from '../stores/skills'
 import { useUiStore } from '../stores/ui'
@@ -33,6 +34,12 @@ const statusFilter = ref<StatusFilter>('all')
 const sortKey = ref<SortKey>('name')
 const agentFilter = ref<string | null>(null)
 const showImport = ref(false)
+
+const healthOverview = ref<HealthOverview | null>(null)
+const healthByCapability = computed(
+  () =>
+    new Map((healthOverview.value?.capabilities ?? []).map((item) => [item.capabilityId, item])),
+)
 
 const statusOptions = computed<Array<{ key: StatusFilter; label: string }>>(() => [
   { key: 'all', label: t('skills.filterAll') },
@@ -55,6 +62,7 @@ const columns = computed(() => [
   { key: 'version', label: t('skills.columns.version'), width: '110px' },
   { key: 'installs', label: t('skills.columns.installs') },
   { key: 'state', label: t('skills.columns.state') },
+  { key: 'health', label: t('skills.columns.health'), width: '140px' },
   { key: 'size', label: t('skills.columns.size'), align: 'right' as const, width: '90px' },
   { key: 'source', label: t('skills.columns.source'), width: '110px' },
   { key: 'updated', label: t('skills.columns.updated'), width: '130px' },
@@ -121,12 +129,26 @@ const filteredSkills = computed<Skill[]>(() => {
 
 onMounted(async () => {
   applyRouteQuery()
+  void loadHealth()
   try {
     await store.load(true)
   } catch (err) {
     ui.notifyError(t('errors.skillsFailed'), normalizeError(err))
   }
 })
+
+/** Loaded once for the whole table (capabilityId → health) to avoid N+1 calls. */
+async function loadHealth(): Promise<void> {
+  try {
+    healthOverview.value = await api.healthOverview()
+  } catch {
+    healthOverview.value = null
+  }
+}
+
+function healthFor(skill: Skill): CapabilityHealth | null {
+  return healthByCapability.value.get(skill.id) ?? null
+}
 
 watch(
   () => route.query,
@@ -184,6 +206,7 @@ function clearFilters(): void {
 }
 
 async function refresh(): Promise<void> {
+  void loadHealth()
   try {
     await store.refresh()
   } catch (err) {
@@ -359,6 +382,15 @@ function onImported(skillId: string): void {
                   :tone="badge.tone"
                 />
               </div>
+            </template>
+            <template #cell-health="{ row }">
+              <HealthStatusBadge v-if="healthFor(row)" :state="healthFor(row)?.status ?? 'unverified'" />
+              <StatusBadge
+                v-else
+                :label="t('skills.healthUnchecked')"
+                tone="neutral"
+                icon="alert-circle"
+              />
             </template>
             <template #cell-size="{ row }">
               <span class="num">{{ formatBytes(row.sizeBytes) }}</span>

@@ -2,6 +2,69 @@
 
 本项目遵循「没有验证过的能力不写成已提供」的原则；版本号从 `0.1.0` 起。
 
+## 0.2.0 — 2026-10-20
+
+产品定位升级为 **AgentHub · Capability Control Center**。第二轮落地 **Capability Validation Platform**：DB v2、静态审计、依赖/环境诊断、更新影响、人工验证证据、Agent Health Monitor、CLI/UI 新命令与页面。安装/同步继续复用第一轮事务引擎，不重复实现。
+
+> 版本状态：`Cargo.toml`/`package.json`/`tauri.conf.json` 已 bump 到 **0.2.0**；0.2.0 `.app`（7.49 MiB）与 `AgentHub_0.2.0_aarch64.dmg`（3.95 MiB）已于 16:33–16:34 构建，`/Applications/AgentHub.app` 已覆盖安装 0.2.0。签名/公证未做；旧 0.1.0 DMG 仍在 bundle 目录（可清理，产物以 0.2.0 为准）。
+
+### Added
+
+- **Capability Validator**（`audit.rs`）：确定性静态审计；spec/security/quality/dependency 规则；finding（id/severity/category/title/detail/path/suggestion）、status `pass|warn|fail`、risk `low..critical`；不执行脚本、不联网、无 AI 评分；凭据值脱敏。
+- **依赖与环境诊断**（`deps.rs`）：shebang runtime 真实探测（`--version`，2s 超时）、`requirements.txt`/`pyproject.toml`/`package.json` 解析、Python/Node 兼容性提示；MCP/凭据静态 `unknown`；status `healthy|needs_attention|unknown`。
+- **更新影响分析**（`impact.rs`）：版本文件 diff（最多 500 条 + 真实总数）、classes（`docs_only`/`skill_md_changed`/`new_script`/`removed_script`/`script_changed`/`new_network_domain`/`removed_network_domain`/`new_dependency`/`removed_dependency`/`new_binary`/`files_added`/`files_removed`/`large_change`）、风险、`requiresRevalidation`；写入 `update_impacts`；分发计划 warnings 显示。
+- **人工验证证据**（`validation_runs`）：agent/case/status/notes/evidence/kind；明确「封闭 Agent 无法自动 E2E，这是人工证据不是自动通过」；只有 manual passed 可贡献 verified。
+- **健康状态机**（`validation.rs`）：`NotDeployed` / `Failed` / `NeedsAttention` / `Verified` / `Unverified`；安装≠验证；audit fail 或 deps needs_attention 优先；只有当前版本全部安装 Agent manual passed 才 verified；旧版本证据失效。
+- **Agent Health Monitor**（`agent_health.rs` + `agent_versions`）：读取 `.app` 的 `CFBundleShortVersionString`（plutil→XML→mdls）与 CLI `--version`；首次 baseline；版本变化提示重新扫描/验证；同秒用 rowid 决胜。
+- **DB v2**：新增 `capability_audits`、`dependency_reports`、`update_impacts`、`validation_runs`、`agent_versions`；v1 自动升级、幂等；真实 `~/.agenthub` 已验证。
+- **Tauri 命令（47，+9）**：`skills_audit`、`skills_dependencies`、`skills_audit_history`、`skills_preview_update`、`skills_health`、`health_overview`、`validations_list`、`validations_record`、`agent_health`。
+- **CLI**：`health`（`--agents`/`--record`）、`skills audit|deps|impact|validate`；audit fail → 退出码 2，deps needs_attention → 2。
+- **UI**：`/health` 页（摘要/筛选/搜索/能力表/重新检查）；SkillDetail 四区块（安全审计/依赖与环境/更新影响/验证证据）；Agents 版本健康；Dashboard 健康摘要与 Skills 健康列；分发预览 `UpdateImpactSummary` 与「需重新验证」提示。
+- **测试**：core unit 44、integration validator 11；CLI validator 7；前端 health/health-ui 测试；same-second 排序回归。
+- 文档：新增 [VALIDATION.md](VALIDATION.md)；更新 README/PRD/ARCHITECTURE/DATA-MODEL/ADAPTER-SPEC/SECURITY/UI-SPEC/TEST-PLAN/ROADMAP；截图 `docs/evidence/gui-health.png`。
+
+### Changed
+
+- 产品定位：能力管理器 → **Capability Control Center**；README/PRD 增加验证工作流「导入 → 审计 → 依赖 → 分发（含影响）→ 验证证据 → 更新 → 回滚」。
+- `service.rs` 分发计划在版本更新时自动计算 impact，并把摘要/`requiresRevalidation` 写入 plan warnings。
+- `installations.scope` 已记录（global/custom）；`scan_results.scope` 已写入；import 已写 operations + JSONL 审计（第一轮末尾）。
+- MCP env 不再进入 `operations.plan`（第一轮末尾修复，0.2 沿用）。
+- Agent 版本观测首次为 baseline；版本变化只提示重新扫描/验证，不自动阻断。
+
+### Fixed
+
+- **same-second Agent 版本排序**（QA 发现）：`agent_versions` 读取/列表改为 `detected_at DESC, rowid DESC`；同秒多次写入取最新一条，回归用例已启用。
+- **人工 passed 不能覆盖 audit fail**：健康推导安全优先，`manual_pass_cannot_override_a_failed_static_audit` 回归。
+- **静态审计密钥泄露风险**：finding/操作/日志不写原值（redacted），`...never_store_raw_secrets` 回归。
+- **DB v1→v2**：旧库自动建新表并保留数据（`v2_migration_rebuilds_tables_and_preserves_v1_data`）。
+- 第一轮遗留（MCP preflight/CLI dry-run/DMG/安装）保持修复状态。
+
+### Known issues
+
+| 严重度 | 问题 | 参考 |
+|---|---|---|
+| 中 | 静态审计是启发式规则，可能漏报/误报；不是完备安全证明 | VALIDATION §10 |
+| 中 | 人工证据 notes/evidence 是用户输入，不做真实性/防伪证明 | VALIDATION §6 |
+| 中 | MCP/凭据依赖仍为静态 `unknown`；未试连/未验证凭据有效性 | SECURITY R15 |
+| 中 | Agent 版本探测依赖 app bundle/CLI 输出；非标准打包可能 unknown | ADAPTER-SPEC §3.5 |
+| 中 | MCP headers 仍明文；`security -w` argv；快照/备份含配置 | SECURITY R2-R4 |
+| 中 | 未签名/未公证（0.2.0 DMG 已产出并安装） | ROADMAP R11 |
+| 低 | 项目级安装仍按 custom root 处理；`target_within_roots` 未接入；备份恢复未实现 | ARCHITECTURE §9 |
+| 低 | 无 Tauri GUI 自动化（Health/分发点击流）；仅人工截图 | TEST-PLAN §6 |
+
+### Verification status
+
+- 0.2.0 产物：`AgentHub.app`（7.49 MiB）与 `AgentHub_0.2.0_aarch64.dmg`（3.95 MiB）已于 2026-10-20 16:33–16:34 构建；`/Applications/AgentHub.app` 已覆盖安装 0.2.0。签名/公证未做。
+- `./scripts/cargo.sh test -p agenthub-core`：**76 passed / 0 failed**（44 unit + 32 integration，validator 11）。
+- `./scripts/cargo.sh test -p agenthub-cli`：**16 passed / 0 failed**。
+- Rust 合计 **92 passed / 0 failed**；`./scripts/cargo.sh check -p agenthub` exit 0。
+- `pnpm test`：**7 files / 29 tests passed**；`pnpm build` 通过。
+- 真实 Mac validator：DB v1→v2、Agent 版本、audit/deps/impact/validate；证据 `/tmp/agenthub-validator-real/`。
+- GUI（隔离 home）：Dashboard 健康摘要/onboarding/中文界面/活动历史；截图 `docs/evidence/`。
+- 未验证：签名/公证、GUI 自动化、真实 Keychain 正向、真实 MCP 配置写入、并发/中断/磁盘满、非 macOS。
+
+---
+
 ## 0.1.0 — 2026-10-20
 
 首个可运行版本：本机多 Agent 能力管理核心、CLI、Tauri 命令层、GUI、测试基线与文档。已完成真实 Mac 验收与 GUI 运行验收；MCP 正常路径可用；DMG 已产出，headers 凭据化与签名/公证仍未完成。
@@ -89,7 +152,7 @@
 - DSH symlink 能力声明与本机证据不一致。
 - 原子写失败时的回滚路径（临时文件/备份文件清理）与 symlink 删除不跟随链接。
 
-### Known issues
+### Known issues（0.1.0 历史；其中 env plan/log/import/GUI 等已在 0.2.0 修复，当前以 0.2.0 为准）
 
 | 严重度 | 问题 | 参考 |
 |---|---|---|
@@ -108,7 +171,7 @@
 | 中 | DMG 已产出，但未签名/未公证 | ROADMAP R11、ACCEPTANCE-REPORT |
 | 低 | `doctor().home` 实际返回 data_dir（历史命名） | DATA-MODEL / ACCEPTANCE-REPORT |
 
-### Verification status
+### Verification status（第一轮基线，历史；当前见 0.2.0）
 
 - `./scripts/cargo.sh test -p agenthub-core -p agenthub-cli`：**exit 0**；core 21 + CLI 9（共 30）全部通过。
 - `pnpm test`（vitest）：**5 文件 / 21 测试全部通过**。
@@ -120,6 +183,6 @@
 
 ## 状态标记说明
 
-- **已验证**：代码路径 + 真实命令/测试输出（core 21、CLI 9、前端 21、`pnpm build`、`pnpm tauri build --bundles app`、真实 Mac 验收、GUI 运行验收）。
+- **已验证**：代码路径 + 真实命令/测试输出（core 76、CLI 16、前端 29、`pnpm build`、完整 `pnpm tauri build`、第一轮真实 Mac 安装验收、第二轮真实 Mac validator 验收、GUI 运行验收）。
 - **未验证**：签名/公证（DMG 已产出）、GUI 自动化、真实 Keychain 正向、真实 MCP 配置写入、并发/中断、非 macOS、部分 adapter 路径。
-- **已知限制**：见上文 Known issues（headers 明文、secret argv、备份/快照含凭据、备份恢复、项目 scope、签名/公证等）。
+- **已知限制**：见上文 Known issues（静态审计启发式、人工证据用户输入、headers 明文、secret argv、备份/快照含凭据、备份恢复、项目 scope、签名/公证等）。

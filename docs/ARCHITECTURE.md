@@ -7,33 +7,39 @@
 
 ## 0. 一页总览
 
-AgentHub 是「本地多 Agent 能力管理中心」：把 Skills、MCP 定义、插件清单集中登记，再通过 **adapter + 事务化写入器** 分发到本机已安装的 Agent。核心不是文件同步器，而是三件事：
+AgentHub 是「本地 Agent 能力控制中心（Capability Control Center）」：把 Skills、MCP 定义、插件清单集中登记，通过 **adapter + 事务化写入器** 分发，并用 **验证平台** 回答「能不能用、安不安全、更新后会不会坏」。核心不是文件同步器，而是四件事：
 
 1. **能力注册表**（SQLite）：capability / version / installation 的事实记录；
 2. **适配层**（`AgentAdapter` trait）：每个 Agent 的路径、格式、能力等级；
-3. **事务化分发**（`ops::Executor`）：先计划、再预检、快照、写入、校验，失败逆序补偿。
+3. **事务化分发**（`ops::Executor`）：先计划、再预检、快照、写入、校验，失败逆序补偿；
+4. **验证平台**（`audit`/`deps`/`impact`/`validation`/`agent_health`）：静态审计、依赖诊断、更新影响、人工证据、Agent 版本健康。
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
 │ 表现层                                                               │
-│  Vue 3 UI (src/**，进行中)            Tauri 命令层 (src-tauri/src/lib.rs)│
-│  CLI (crates/agenthub-cli，已实现，薄前端)                            │
+│  Vue 3 UI (src/**，11 路由/12 视图)  Tauri 命令层 (47 个命令)         │
+│  CLI (crates/agenthub-cli，已实现，薄前端；health/audit/deps/...)     │
 └───────────────────────────────┬──────────────────────────────────────┘
                                 │ 同一入口：AgentHub 服务
 ┌───────────────────────────────▼──────────────────────────────────────┐
 │ 领域服务层  crates/agenthub-core/src/service.rs (AgentHub)            │
 │  bootstrap / settings / scan / import / plan / apply / rollback /     │
-│  dashboard / doctor / profiles / plugins / MCP 门面                   │
+│  dashboard / doctor / profiles / plugins / MCP / health 门面          │
 └───────┬──────────────┬───────────────┬───────────────┬───────────────┘
         │              │               │               │
 ┌───────▼──────┐ ┌─────▼──────┐ ┌──────▼───────┐ ┌─────▼──────────────┐
 │ ops.rs       │ │ mcp.rs     │ │ skill.rs     │ │ scan.rs            │
 │ 事务/快照/   │ │ 定义/发现/ │ │ 解析/校验/   │ │ 只读发现与缓存     │
-│ 回滚         │ │ codec/写回 │ │ 解压/克隆    │ │                    │
-└───────┬──────┘ └─────┬──────┘ └──────┬───────┘ └─────┬──────────────┘
-        │              │               │               │
-┌───────▼──────────────▼───────────────▼───────────────▼──────────────┐
-│ adapters/  AgentAdapter tram + 9 个内置适配器 (builtin.rs)           │
+│ 回滚/审计    │ │ codec/写回 │ │ 解压/克隆    │ │                    │
+└──────────────┴─────────────┴──────────────┴──────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│ 验证平台（只读/确定性）                                               │
+│ audit.rs（静态规则）  deps.rs（环境/依赖）  impact.rs（更新影响）     │
+│ validation.rs（健康状态机）  agent_health.rs（版本/路径健康）         │
+└───────────────────────────────┬──────────────────────────────────────┘
+                                │
+┌───────────────────────────────▼──────────────────────────────────────┐
+│ adapters/  AgentAdapter trait + 9 个内置适配器 (builtin.rs)          │
 │ library.rs 中央库布局/备份    db.rs SQLite    util.rs 安全文件操作    │
 └───────────────────────────────────┬──────────────────────────────────┘
                                     │
@@ -50,7 +56,7 @@ AgentHub 是「本地多 Agent 能力管理中心」：把 Skills、MCP 定义�
 
 | 层 | 文件 | 职责 | 不做什么 |
 |---|---|---|---|
-| 命令层 | `src-tauri/src/lib.rs` | 38 个 `#[tauri::command]`；管理 `AppState`；把错误转成 `String` | 不含业务规则 |
+| 命令层 | `src-tauri/src/lib.rs` | 47 个 `#[tauri::command]`；管理 `AppState`；把错误转成 `String` | 不含业务规则 |
 | 外观/服务 | `service.rs` | 唯一业务入口；读设置、拼计划、调 Executor、组装 View | 不直接写 Agent 配置（MCP 例外见 §7） |
 | 事务执行 | `ops.rs` | preflight → snapshot → apply → verify → record；失败补偿；rollback | 不解析 SKILL.md |
 | MCP | `mcp.rs` | MCP 定义 CRUD、发现、计划、格式 codec、Keychain、配置写回 | 不管理 Skill |
@@ -58,7 +64,12 @@ AgentHub 是「本地多 Agent 能力管理中心」：把 Skills、MCP 定义�
 | 扫描 | `scan.rs` | 遍历各 Agent 的 skill roots，读 SKILL.md，刷新 `scan_results` | 绝不写 Agent 目录 |
 | 适配器 | `adapters/mod.rs` + `builtin.rs` | 路径/检测/能力声明/插件发现 | 不执行写入 |
 | 中央库 | `library.rs` | 目录布局、版本存储、快照目录、完整备份 | 不持有数据库连接 |
-| 持久化 | `db.rs` | SCHEMA_V1、迁移、所有 SQL | 不读文件系统 |
+| 持久化 | `db.rs` | SCHEMA_V1 + SCHEMA_V2、`PRAGMA user_version` 迁移、所有 SQL | 不读文件系统 |
+| 验证-静态审计 | `audit.rs` | 确定性规则、finding 排序/脱敏、symlink 不跟随 | 不执行脚本、不联网、不做 AI 评分 |
+| 验证-依赖 | `deps.rs` | shebang runtime 探测、manifest 解析、MCP/凭据 unknown | 不安装依赖、不执行 skill 脚本 |
+| 验证-影响 | `impact.rs` | 版本 diff、classes、风险、requiresRevalidation | 不做运行时验证 |
+| 验证-状态机 | `validation.rs` | 由 audit/deps/validations/installed agents 推导 HealthState | 不自动判定通过 |
+| Agent 健康 | `agent_health.rs` | `.app`/CLI 版本探测、2s 超时、baseline/changed | 不猜测版本 |
 | 工具 | `util.rs` | hash、原子写、安全删除/复制、路径规范化 | 不含业务语义 |
 | 错误 | `error.rs` | 统一错误分类（Conflict/Blocked/Verification/ExternalModification…） | — |
 
@@ -258,6 +269,47 @@ MCP 计划实现：`mcp.rs:809-1000`。目标选择条件：`supported_format`�
 
 ---
 
+### 2.7 验证平台数据流（audit / deps / impact / health）
+
+```mermaid
+sequenceDiagram
+    participant U as UI/CLI
+    participant S as AgentHub
+    participant A as audit.rs
+    participant D as deps.rs
+    participant I as impact.rs
+    participant V as validation.rs
+    participant DB as SQLite v2
+    U->>S: skills audit / skills deps
+    S->>A: audit_skill_dir(library version dir)
+    A-->>S: status/risk/findings (不执行脚本)
+    S->>DB: insert capability_audits
+    S->>D: check_skill_dependencies(dir)
+    D->>D: shebang runtime --version (2s) + manifests
+    D-->>S: status/risk/items
+    S->>DB: insert dependency_reports
+    U->>S: skills impact (from v1, to v2)
+    S->>I: analyze_impact(old_dir,new_dir)
+    I-->>S: fileChanges/classes/risk/requiresRevalidation
+    S->>DB: insert update_impacts
+    S->>S: plan warnings += impact
+    U->>S: skills validate / validations_record
+    S->>DB: insert validation_runs + audit log
+    U->>S: health / health_overview
+    S->>DB: latest audit/deps/validations/installations
+    S->>V: derive_health(audit,deps,validations,agents)
+    V-->>S: HealthState + reasons
+```
+
+关键点：
+
+- 审计/依赖每次运行都会**追加**历史行（`created_at DESC` 取最新）；impact 按 `(capability, from, to)` 缓存并可复用。
+- `derive_health` 只读取**当前版本**证据；旧版本 `failed`/`passed` 不参与。
+- 分发计划生成时会自动调用 `preview_update`，把 impact 摘要与 `requiresRevalidation` 写入 plan warnings（`service.rs:1130-1165`）。
+- Agent 版本由 `agent_health.rs` 读取 `.app`/CLI，`record=true` 时写 `agent_versions`；同秒用 `rowid` 决胜（`db.rs:1807-1870`）。
+
+---
+
 ## 3. 事务、快照与一致性
 
 ### 3.1 事务边界
@@ -303,7 +355,7 @@ MCP 写回的校验是「回读单条目 canonical hash 是否等于 payload has
 
 ---
 
-## 4. 中央库目录布局（真实实现）
+## 4. 中央库与数据库布局（真实实现）
 
 `library.rs:3-13` 的布局注释与代码完全对应：
 
@@ -331,7 +383,7 @@ MCP 写回的校验是「回读单条目 canonical hash 是否等于 payload has
 
 实现：`library.rs:59-90`、`library.rs:93-112`、`library.rs:122-194`；审计写入：`ops.rs:24-44`。版本目录通过「staging 复制 → rename」落位，重复内容直接复用；并发导入的竞态用「rename 前再检查一次」缓解（`library.rs:106-110`）。
 
-> 注意：`agenthub.db` 始终在 `data_dir`（`~/.agenthub/agenthub.db`）。把 library_root 改到别的磁盘时，数据库不跟着走；`change_library_root` 只复制旧库目录内容（`service.rs:391-415`）。
+> 注意：`agenthub.db` 始终在 `data_dir`（`~/.agenthub/agenthub.db`）。把 library_root 改到别的磁盘时，数据库不跟着走；`change_library_root` 只复制旧库目录内容（`service.rs:391-415`）。DB 当前 `PRAGMA user_version=2`：v1 表 + `capability_audits`/`dependency_reports`/`update_impacts`/`validation_runs`/`agent_versions`（见 [DATA-MODEL.md §2](DATA-MODEL.md)）。
 
 ---
 
@@ -412,20 +464,24 @@ MCP 的格式扩展点集中在 `mcp.rs`：
 | 4 | `target_within_roots` 未被调用 | `ops.rs:870-882`（grep 无调用方） | 目标路径合法性仅靠 preflight 的绝对路径检查 + adapter 生成的根 |
 | 5 | 项目级安装语义 | `pick_install_root` 只区分 custom/global（`service.rs:1081-1108`），项目根按 custom root 处理 | `installations.scope` 可写 global/custom；项目级独立流程未实现 |
 | 6 | `scan_on_startup` 未在核心启动时生效 | `service.rs:117` 仅种值；`open()` 不扫描 | UI 在 `App.vue` 中按设置触发扫描；核心本身不自动扫描 |
-| 7 | 缺少核心纯函数单元测试 | core 集成 21、CLI 9、前端 21 | 关键纯函数（hash/codec）仍靠集成覆盖 |
+| 7 | 核心纯函数仍有覆盖缺口 | core 76（44 unit + 32 integration）、CLI 16、前端 29 | 已有大量单测；仍非全量穷举 |
 | 8 | 完整备份无恢复路径 | `library.rs` 只有 create/list | 备份只能手工拷回，UI 无恢复入口 |
-| 9 | 签名/公证 | DMG 已产出（`AgentHub_0.1.0_aarch64.dmg`，3.77 MiB，15:59）；无签名/公证配置 | 本机构建 app+DMG 可用；分发给他人前需 Developer ID 签名 + notarization |
+| 9 | 签名/公证 | 0.2.0 DMG 已产出（`AgentHub_0.2.0_aarch64.dmg`，3.95 MiB，16:34）；无签名/公证配置 | 本机构建 app+DMG 可用并已覆盖安装；分发给他人前需 Developer ID 签名 + notarization |
 | 10 | `doctor().home` 命名 | `service.rs` 返回 `data_dir` | 字段名为历史遗留，实际是数据目录；文档/UI 标注为「数据目录」 |
+| 11 | 静态审计是启发式 | `audit.rs` 规则匹配 | 可能漏报/误报；不是完备安全证明，不执行脚本/不联网 |
+| 12 | 人工证据是用户输入 | `validation_runs.notes/evidence` | 真实性由用户负责；不自动判定通过、不做防伪 |
+| 13 | MCP/凭据静态 unknown | `deps.rs` | 无法证明 server 可连接/凭据有效；需 MCP 管理器单独验证 |
+| 14 | Agent 版本探测依赖 bundle/CLI | `agent_health.rs` | 非标准打包可能无版本；显示未知，不猜测 |
 
-> 2026-10-20 15:24–15:56 期间已修复并验证：MCP 非 force preflight、MCP 执行接通、删除 stale key、MCP env 计划脱敏、`installations.scope` 记录、`scan_results.scope` 写入、import 审计、JSONL 操作日志、zip 绝对路径拒绝；见 [CHANGELOG.md](CHANGELOG.md)。
+> 2026-10-20 15:24–16:24 期间已修复并验证：MCP 非 force preflight、MCP 执行接通、删除 stale key、MCP env 计划脱敏、`installations.scope` 记录、`scan_results.scope` 写入、import 审计、JSONL 操作日志、zip 绝对路径拒绝；第二轮新增 DB v2、静态审计/依赖/影响/人工证据、Agent 版本健康与 same-second 排序修复；见 [CHANGELOG.md](CHANGELOG.md)。
 
 ---
 
 ## 9.5 状态标记（已验证 / 未验证 / 已知限制）
 
-- **已验证**：分层/事务/快照/回滚与 CLI 复用；隔离 home 全链路；**真实 Mac 验收**（真实库导入/分发/更新/回滚/卸载/备份/doctor，见 [ACCEPTANCE-REPORT.md](ACCEPTANCE-REPORT.md)）；GUI（隔离 home）运行；core 21、CLI 9、前端 21 测试通过。
+- **已验证**：分层/事务/快照/回滚与 CLI 复用；验证平台（audit/deps/impact/validation/agent_health）与 DB v2；**真实 Mac 验收**（第一轮安装/分发/更新/回滚；第二轮 DB v1→v2、真实 Agent 版本、真实 audit/deps/impact/validate，见 [ACCEPTANCE-REPORT.md](ACCEPTANCE-REPORT.md)、[VALIDATION.md](VALIDATION.md)）；GUI（隔离 home）运行；core 76、CLI 16、前端 29 测试通过。
 - **未验证**：签名/公证（DMG 已产出）、GUI 自动化、真实 Keychain 正向写入、真实 MCP 配置写入、并发/中断/磁盘满、非 macOS。
-- **已知限制**：见上表（MCP 空表/headers、项目级安装语义、备份不可恢复、`target_within_roots` 未接入、无核心单元测试、签名/公证）。
+- **已知限制**：见上表（静态审计启发式、人工证据用户输入、MCP headers/空表、项目级安装语义、备份不可恢复、`target_within_roots` 未接入、签名/公证）。
 
 ## 10. 交叉链接
 

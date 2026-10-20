@@ -626,3 +626,187 @@ export interface Bootstrap {
   coreVersion: string
   projectRoots: string[]
 }
+
+// ---------------------------------------------------------------------------
+// Capability health, audits, dependency diagnostics, validation evidence
+// ---------------------------------------------------------------------------
+
+export type HealthState = 'verified' | 'unverified' | 'needs_attention' | 'failed' | 'not_deployed'
+export type AuditStatus = 'pass' | 'warn' | 'fail' | 'unknown'
+export type AuditRisk = 'low' | 'medium' | 'high' | 'critical'
+export type FindingSeverity = 'info' | 'low' | 'medium' | 'high' | 'critical'
+export type FindingCategory = 'spec' | 'security' | 'dependency' | 'quality' | 'compatibility'
+export type DependencyStatus = 'ok' | 'missing' | 'warning' | 'unknown'
+export type DependencyKind =
+  | 'runtime'
+  | 'binary'
+  | 'manifest'
+  | 'mcp'
+  | 'credential'
+  | 'package'
+export type FileChangeKind = 'added' | 'removed' | 'modified'
+export type ValidationStatus = 'passed' | 'failed' | 'needs_attention' | 'unverified'
+export type ValidationKind = 'manual' | 'static' | 'environment' | 'regression'
+export type AuditKind = 'static' | 'environment'
+
+export interface AuditFinding {
+  id: string
+  severity: FindingSeverity
+  category: FindingCategory
+  title: string
+  detail: string
+  path: string | null
+  suggestion: string | null
+}
+
+export interface CapabilityAudit {
+  id: string
+  capabilityId: string
+  versionId: string
+  versionLabel: string
+  kind: AuditKind | string
+  status: AuditStatus
+  risk: AuditRisk
+  summary: string
+  findings: AuditFinding[]
+  createdAt: string
+}
+
+export interface DependencyItem {
+  name: string
+  kind: DependencyKind
+  requiredVersion: string | null
+  found: string | null
+  status: DependencyStatus
+  detail: string
+  sourcePath: string | null
+  suggestion: string | null
+}
+
+export interface DependencyReport {
+  capabilityId: string
+  versionId: string
+  status: 'healthy' | 'needs_attention' | 'unknown'
+  risk: AuditRisk
+  summary: string
+  items: DependencyItem[]
+  checkedAt: string
+}
+
+export interface FileChange {
+  path: string
+  change: FileChangeKind
+  sizeBefore: number
+  sizeAfter: number
+}
+
+export interface UpdateImpact {
+  id: string
+  capabilityId: string
+  fromVersionId: string
+  fromVersionLabel: string
+  toVersionId: string
+  toVersionLabel: string
+  risk: AuditRisk
+  summary: string
+  fileChanges: FileChange[]
+  /** e.g. docs_only, new_script, removed_script, new_network, new_dependency */
+  classes: string[]
+  findings: AuditFinding[]
+  affectedInstallationCount: number
+  affectedAgentKeys: string[]
+  affectedProjectRoots: string[]
+  requiresRevalidation: boolean
+  createdAt: string
+}
+
+export interface ValidationRun {
+  id: string
+  capabilityId: string
+  versionId: string
+  versionLabel: string
+  agentId: string | null
+  agentKey: string | null
+  agentName: string | null
+  kind: ValidationKind | string
+  status: ValidationStatus
+  caseName: string
+  notes: string
+  evidence: string
+  actor: string
+  createdAt: string
+}
+
+export interface ValidationRequest {
+  capabilityId: string
+  versionId: string | null
+  agentId: string | null
+  kind: string | null
+  status: ValidationStatus
+  caseName: string
+  notes: string | null
+  evidence: string | null
+}
+
+export interface CapabilityHealth {
+  capabilityId: string
+  slug: string
+  name: string
+  description: string
+  versionLabel: string
+  status: HealthState
+  reasons: string[]
+  audit: CapabilityAudit | null
+  environment: DependencyReport | null
+  validations: ValidationRun[]
+  installationCount: number
+  agentKeys: string[]
+  verifiedAgentKeys: string[]
+  lastCheckedAt: string | null
+}
+
+export interface HealthSummary {
+  total: number
+  verified: number
+  unverified: number
+  needsAttention: number
+  failed: number
+  notDeployed: number
+  lastCheckedAt: string | null
+}
+
+export interface HealthOverview {
+  summary: HealthSummary
+  capabilities: CapabilityHealth[]
+}
+
+export interface AgentHealth {
+  agentId: string
+  agentKey: string
+  agentName: string
+  status: AgentStatus
+  version: string | null
+  previousVersion: string | null
+  versionChanged: boolean
+  versionChangedAt: string | null
+  pathsOk: boolean
+  notes: string[]
+  checkedAt: string
+}
+
+export interface AgentHealthReport {
+  checkedAt: string
+  agents: AgentHealth[]
+}
+
+export interface AuditRequest {
+  capabilityId: string
+  versionId: string | null
+  kind: string | null
+}
+
+export interface ImpactRequest {
+  capabilityId: string
+  fromVersionId: string | null
+  toVersionId: string
+}

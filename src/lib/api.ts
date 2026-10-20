@@ -1,16 +1,23 @@
 import { invoke, isTauri } from '@tauri-apps/api/core'
 
 import type {
+  AgentHealthReport,
   AgentPathUpdate,
   AgentView,
   AppSettings,
+  AuditRequest,
   BackupResult,
   BackupView,
   Bootstrap,
+  CapabilityAudit,
+  CapabilityHealth,
   ChangeCheck,
   Dashboard,
+  DependencyReport,
   DiscoveredMcp,
   DoctorReport,
+  HealthOverview,
+  ImpactRequest,
   ImportRequest,
   ImportResult,
   InstallRequest,
@@ -31,6 +38,9 @@ import type {
   SkillDetail,
   SnapshotView,
   UninstallRequest,
+  UpdateImpact,
+  ValidationRequest,
+  ValidationRun,
 } from './types'
 
 /** Error raised by the Tauri bridge, normalized to a readable message. */
@@ -125,6 +135,25 @@ export const api = {
   planInstall: (request: InstallRequest) => call<OperationPlan>('skills_plan_install', { request }),
   planUninstall: (request: UninstallRequest) =>
     call<OperationPlan>('skills_plan_uninstall', { request }),
+
+  // capability health / audits / validations
+  skillsAudit: (request: AuditRequest) =>
+    call<CapabilityAudit>('skills_audit', { request }),
+  skillsDependencies: (request: AuditRequest) =>
+    call<DependencyReport>('skills_dependencies', { request }),
+  skillsHealth: (capabilityId: string) =>
+    call<CapabilityHealth>('skills_health', { capability_id: capabilityId }),
+  healthOverview: () => call<HealthOverview>('health_overview'),
+  skillsPreviewUpdate: (request: ImpactRequest) =>
+    call<UpdateImpact>('skills_preview_update', { request }),
+  validationsList: (capabilityId: string, limit?: number) =>
+    call<ValidationRun[]>('validations_list', {
+      capability_id: capabilityId,
+      limit: limit ?? null,
+    }),
+  validationsRecord: (request: ValidationRequest) =>
+    call<ValidationRun>('validations_record', { request }),
+  agentHealth: (record: boolean) => call<AgentHealthReport>('agent_health', { record }),
 
   // operations
   applyOperation: (operationId: string, force: boolean) =>

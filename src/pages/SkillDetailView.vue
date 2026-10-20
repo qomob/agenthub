@@ -10,6 +10,7 @@ import Icon from '../components/Icon.vue'
 import LoadingState from '../components/LoadingState.vue'
 import PageHeader from '../components/PageHeader.vue'
 import PlanDialog from '../components/PlanDialog.vue'
+import SkillHealthPanel from '../components/SkillHealthPanel.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import { api, normalizeError } from '../lib/api'
 import { formatBytes, formatDateTime, formatRelativeTime, shortHash } from '../lib/format'
@@ -31,6 +32,7 @@ import type {
   OperationPlan,
   OperationView,
   SkillDetail,
+  UpdateImpact,
 } from '../lib/types'
 import { useAppStore } from '../stores/app'
 import { useSkillsStore } from '../stores/skills'
@@ -65,6 +67,7 @@ const distributeStrategy = ref<'default' | InstallStrategy>('default')
 const distributeVersionId = ref<string>('')
 const distributeBusy = ref(false)
 const distributeError = ref<string | null>(null)
+const distributeImpacts = ref<UpdateImpact[]>([])
 
 const uninstallOpen = ref(false)
 const selectedInstallations = ref<string[]>([])
@@ -135,8 +138,31 @@ function openDistribute(): void {
   selectedAgents.value = []
   distributeStrategy.value = 'default'
   distributeVersionId.value = detail.value?.skill.currentVersionId ?? ''
+  distributeImpacts.value = []
   distributeError.value = null
   distributeOpen.value = true
+}
+
+/** One update-impact preview per distinct installed version that differs from the target. */
+async function collectDistributeImpacts(targetVersionId: string): Promise<UpdateImpact[]> {
+  const current = skill.value
+  if (!current || targetVersionId.length === 0) return []
+  const seen = new Set<string>()
+  const collected: UpdateImpact[] = []
+  for (const agentId of selectedAgents.value) {
+    const installation = current.installations.find((item) => item.agentId === agentId)
+    if (!installation || installation.versionId === targetVersionId) continue
+    if (seen.has(installation.versionId)) continue
+    seen.add(installation.versionId)
+    collected.push(
+      await api.skillsPreviewUpdate({
+        capabilityId: current.id,
+        fromVersionId: installation.versionId,
+        toVersionId: targetVersionId,
+      }),
+    )
+  }
+  return collected
 }
 
 async function previewDistribute(): Promise<void> {
@@ -147,7 +173,10 @@ async function previewDistribute(): Promise<void> {
   }
   distributeBusy.value = true
   distributeError.value = null
+  distributeImpacts.value = []
   try {
+    const targetVersionId = distributeVersionId.value || skill.value.currentVersionId
+    const impactList = await collectDistributeImpacts(targetVersionId)
     const plan = await api.planInstall({
       capabilityId: skill.value.id,
       versionId: distributeVersionId.value || null,
@@ -155,6 +184,7 @@ async function previewDistribute(): Promise<void> {
       strategy: distributeStrategy.value === 'default' ? null : distributeStrategy.value,
       force: false,
     })
+    distributeImpacts.value = impactList
     plans.value = [plan]
     distributeOpen.value = false
   } catch (err) {
@@ -287,6 +317,8 @@ function installationStateLabel(state: InstallationState): string {
       <LoadingState v-if="loading && !detail" :label="t('skillDetail.loading')" />
 
       <template v-else-if="detail && skill">
+        <SkillHealthPanel :skill="skill" :versions="detail.versions" />
+
         <div class="grid-2">
           <div class="section-stack">
             <div class="card">
@@ -734,6 +766,7 @@ function installationStateLabel(state: InstallationState): string {
     <PlanDialog
       v-if="plans"
       :plans="plans"
+      :impacts="distributeImpacts"
       @close="plans = null"
       @applied="afterApplied"
     />

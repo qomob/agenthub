@@ -1,6 +1,6 @@
 # AgentHub 数据模型
 
-> 状态基准：2026-10-20，以 `crates/agenthub-core/src/db.rs` 的 `SCHEMA_V1`、`model.rs` 的序列化结构、`service.rs`/`ops.rs`/`mcp.rs` 的实际读写路径为准。
+> 状态基准：2026-10-20 16:24，DB 为 **v2**（`SCHEMA_V1` + `SCHEMA_V2`）。以 `crates/agenthub-core/src/db.rs`、`model.rs`、`service.rs`/`ops.rs`/`mcp.rs` 与验证平台模块的实际读写路径为准。
 > 阅读约定：**已验证** = 代码中存在且本次通读过实现；**未验证** = 结构存在但无调用方/无运行时验证；**已知限制** = 与设计目标存在偏差。
 
 ---
@@ -8,11 +8,11 @@
 ## 0. 结论摘要
 
 1. AgentHub 只有 **一个 SQLite 数据库**（默认 `~/.agenthub/agenthub.db`），只存元数据；Skill 文件内容存放在库目录 `library/skills/<slug>/<hash12>/`，数据库不存二进制内容。
-2. 全部 SQLite schema 定义在 `crates/agenthub-core/src/db.rs:14`（`SCHEMA_V1`），共 **13 张表**、**8 个显式索引**、**4 个唯一约束/唯一索引**。
+2. SQLite schema 分两版：`SCHEMA_V1`（`db.rs:14`）13 张表；`SCHEMA_V2`（`db.rs:195`）新增 **5 张验证平台表**；当前 `PRAGMA user_version = 2`。
 3. 核心关系是 **`capabilities` → `capability_versions` → `installations`**；MCP 定义独立存 `mcp_definitions`，其部署记录仍写 `installations`（`kind='mcp'`）。
 4. `installations` 的唯一键是 **`(agent_id, target_path, config_key)`**：Skill 安装的 `config_key=''`，MCP 安装的 `config_key=<server 名>`。这是「同一配置文件里放多个 MCP 条目」的关键设计（`db.rs:96`）。
 5. MCP 的 **env 只存 key 名**（`env_keys`）与 Keychain 引用（`credential_refs`），明文值存 macOS Keychain；**分发的 `operations.plan` payload 已剥离 env 值**，执行时才从 Keychain 重建（`mcp.rs:883-890`、`mcp.rs:1111-1122`）。**headers 值仍明文入 `mcp_definitions.headers`**（见 §8）。
-6. 迁移只依赖 `PRAGMA user_version`，当前版本 = **1**；`migrate()` 只处理 `version < 1`，没有 v2 及更早版本的降级保护（`db.rs:444`）。
+6. 迁移只依赖 `PRAGMA user_version`：`version<1` 建 V1，`version<2` 建 V2 并置 2，幂等、无降级保护（`db.rs:509-530`）。
 
 ---
 
@@ -239,6 +239,86 @@
 
 ---
 
+### 2.13 `capability_audits` — 静态/环境审计历史（V2）
+
+| 列 | 类型 | 约束 |
+|---|---|---|
+| `id` | TEXT | PRIMARY KEY |
+| `capability_id` | TEXT | NOT NULL REFERENCES `capabilities(id)` ON DELETE CASCADE |
+| `version_id` | TEXT | NOT NULL REFERENCES `capability_versions(id)` ON DELETE CASCADE |
+| `kind` | TEXT | NOT NULL（`static` / `environment`） |
+| `status` | TEXT | NOT NULL（`pass` / `warn` / `fail` / `unknown`） |
+| `risk` | TEXT | NOT NULL（`low` / `medium` / `high` / `critical`） |
+| `summary` | TEXT | NOT NULL DEFAULT `''` |
+| `findings` | TEXT | NOT NULL DEFAULT `'[]'`（`AuditFinding` JSON 数组） |
+| `created_at` | TEXT | NOT NULL |
+
+索引：`idx_audits_capability(capability_id, version_id, created_at DESC)`。每次审计**追加**一行；健康读取最新行。`findings.detail` 对凭据值脱敏。
+
+### 2.14 `dependency_reports` — 依赖/环境检查历史（V2）
+
+| 列 | 类型 | 约束 |
+|---|---|---|
+| `id` | TEXT | PRIMARY KEY |
+| `capability_id` | TEXT | NOT NULL REFERENCES `capabilities(id)` ON DELETE CASCADE |
+| `version_id` | TEXT | NOT NULL REFERENCES `capability_versions(id)` ON DELETE CASCADE |
+| `status` | TEXT | NOT NULL（`healthy` / `needs_attention` / `unknown`） |
+| `risk` | TEXT | NOT NULL |
+| `summary` | TEXT | NOT NULL DEFAULT `''` |
+| `items` | TEXT | NOT NULL DEFAULT `'[]'`（`DependencyItem` JSON 数组） |
+| `checked_at` | TEXT | NOT NULL |
+
+索引：`idx_deps_capability(capability_id, version_id, checked_at DESC)`。
+
+### 2.15 `update_impacts` — 更新影响缓存（V2）
+
+| 列 | 类型 | 约束 |
+|---|---|---|
+| `id` | TEXT | PRIMARY KEY |
+| `capability_id` | TEXT | NOT NULL REFERENCES `capabilities(id)` ON DELETE CASCADE |
+| `from_version_id` | TEXT | NOT NULL（逻辑指向 `capability_versions.id`，未声明外键） |
+| `to_version_id` | TEXT | NOT NULL（同上） |
+| `risk` | TEXT | NOT NULL |
+| `summary` | TEXT | NOT NULL DEFAULT `''` |
+| `payload` | TEXT | NOT NULL DEFAULT `'{}'`（完整 `UpdateImpact` JSON：fileChanges/classes/findings/scope） |
+| `created_at` | TEXT | NOT NULL |
+
+索引：`idx_impacts_capability(capability_id, created_at DESC)`。同一 `(from,to)` 复用最近一条并重新附加 affected scope。
+
+### 2.16 `validation_runs` — 验证证据（V2）
+
+| 列 | 类型 | 约束 |
+|---|---|---|
+| `id` | TEXT | PRIMARY KEY |
+| `capability_id` | TEXT | NOT NULL REFERENCES `capabilities(id)` ON DELETE CASCADE |
+| `version_id` | TEXT | NOT NULL REFERENCES `capability_versions(id)` ON DELETE CASCADE |
+| `agent_id` | TEXT | REFERENCES `agents(id)` ON DELETE SET NULL（可空 = Agent 无关） |
+| `kind` | TEXT | NOT NULL（`manual` / `static` / `environment` / `regression`） |
+| `status` | TEXT | NOT NULL（`passed` / `failed` / `needs_attention` / `unverified`） |
+| `case_name` | TEXT | NOT NULL |
+| `notes` | TEXT | NOT NULL DEFAULT `''`（用户输入） |
+| `evidence` | TEXT | NOT NULL DEFAULT `''`（用户输入；可能含日志片段/链接） |
+| `actor` | TEXT | NOT NULL DEFAULT `'user'` |
+| `created_at` | TEXT | NOT NULL |
+
+索引：`idx_validations_capability(capability_id, created_at DESC)`。只有 `kind=manual AND status=passed` 且当前版本、每个已安装 Agent 都有记录时才贡献 `verified`；旧版本证据失效。
+
+### 2.17 `agent_versions` — Agent 版本观测（V2）
+
+| 列 | 类型 | 约束 |
+|---|---|---|
+| `id` | TEXT | PRIMARY KEY |
+| `agent_id` | TEXT | NOT NULL REFERENCES `agents(id)` ON DELETE CASCADE |
+| `version` | TEXT | 可空（探测失败时为 NULL，不伪造） |
+| `previous_version` | TEXT | 可空 |
+| `changed` | INTEGER | NOT NULL DEFAULT 0（首次 baseline=false） |
+| `evidence` | TEXT | NOT NULL DEFAULT `''`（探测来源，如 agent key） |
+| `detected_at` | TEXT | NOT NULL |
+
+索引：`idx_agent_versions_agent(agent_id, detected_at DESC)`。读取最新行使用 `ORDER BY detected_at DESC, rowid DESC`（同秒排序回归已修复）。
+
+---
+
 ## 3. 关系说明：capabilities vs capability_versions vs installations
 
 ```mermaid
@@ -252,8 +332,18 @@ erDiagram
     profiles ||--o{ profile_items : "预设包含"
     capabilities ||--o{ profile_items : "预设条目"
     operations ||--o{ snapshots : "一次操作 N 个快照"
+    capabilities ||--o{ capability_audits : "审计历史"
+    capability_versions ||--o{ capability_audits : "审计哪个版本"
+    capabilities ||--o{ dependency_reports : "依赖检查历史"
+    capability_versions ||--o{ dependency_reports : "检查哪个版本"
+    capabilities ||--o{ update_impacts : "更新影响缓存"
+    capabilities ||--o{ validation_runs : "验证证据"
+    capability_versions ||--o{ validation_runs : "证据绑定版本"
+    agents ||--o{ validation_runs : "证据来自哪个 Agent（可空）"
+    agents ||--o{ agent_versions : "Agent 版本观测"
 ```
 
+- **V2 表是「证据」**：`capability_audits`/`dependency_reports` 按版本追加历史；`update_impacts` 按版本对缓存；`validation_runs` 绑定版本+Agent；`agent_versions` 是 Agent 维度的时间序列。
 - **`capabilities` 是「身份」**：同一 `(kind, slug)` 只有一行；`slug` 来自 frontmatter `name` 经 `safe_segment()` 归一化（`skill.rs:47-49`、`util.rs:320-335`）。
 - **`capability_versions` 是「内容」**：内容哈希唯一，导入相同内容不会生成新版本；不同内容生成新版本并把 `capabilities.current_version_id` 指向它（`service.rs:696-794`）。版本行不可变，库目录也不可变。
 - **`installations` 是「事实」**：回答「某 Agent 的某个路径上现在装了什么」。它同时记录 `version_id`（意图）与 `content_hash`（写入时实际内容），所以能检测漂移：实际目录 hash ≠ 记录 hash 时标 `conflict`（`service.rs:545-610`）。
@@ -314,6 +404,11 @@ erDiagram
 | Skill 内容 | 文件系统库目录 | 明文 | `skill_md` 正文也复制一份进 `capability_versions.skill_md` |
 | Agent 配置原文 | 快照目录 | 明文 | 快照是原始配置文件副本，可能已含 token |
 | 操作计划 | `operations.plan` | 明文 JSON | MCP payload 已剥离 env 值；headers 仍会出现在 payload（见 §8） |
+| 审计 findings | `capability_audits.findings` | 明文 JSON | 脚本片段会截断；凭据行只显示类型/行号（value redacted） |
+| 依赖 items | `dependency_reports.items` | 明文 JSON | 只含 runtime/manifest/MCP 元数据，不含凭据值 |
+| 更新影响 | `update_impacts.payload` | 明文 JSON | 文件路径/classes/findings；不含文件内容 |
+| 验证证据 | `validation_runs.notes/evidence` | 明文，**用户输入** | 用户可能粘贴日志/链接；AgentHub 不脱敏、不防伪，UI 需提示 |
+| Agent 版本 | `agent_versions.evidence` | 明文 | 探测来源说明（agent key）；不含命令输出全文 |
 
 原则：**数据库不是密钥库**。Keychain 只是 env 值的唯一存储处；任何明文副本都应视为已知风险，而不是「已加密」。
 
@@ -331,7 +426,8 @@ erDiagram
 | `installations.scope` | **部分实现** | 现在写入规划时的 scope（`ops.rs:622`、`service.rs:1116`）：custom root → `custom`，adapter install root → `global`。项目级安装仍按 custom root 处理，独立 project 流程未实现。 |
 | `scan_results.scope` | **已实现** | 扫描写入 `global`/`project`/`custom`（`scan.rs:137`、`scan.rs:177`）；可用于按 scope 过滤。 |
 | `operations.kind` 的 `import`/`scan`/`sync`/`update` | **部分实现** | `import` 已写入 operations 行；`sync`/`update` 通过 install 计划记录；`scan` 仍不写 operations（只刷新 `scan_results`）。 |
-| 迁移 | **仅 v1** | `migrate()` 只处理 `version < 1`；未来加 v2 需要在 `SCHEMA_V1` 之后追加分支并写测试。没有降级保护。 |
+| V2 证据表 | **已实现** | audit/deps/impact/validation/agent_versions 由新服务写入；无 UI 删除/清理入口（保留历史）。 |
+| 迁移 | **v1 → v2** | `migrate()` 依次执行 `version<1`、`version<2`；旧 v1 库自动建 V2 表并置 `user_version=2`，幂等；无降级保护（`db.rs:509-530`，回归测试 `v2_migration_rebuilds_tables_and_preserves_v1_data`）。 |
 | 备份恢复 | **未实现** | `backups/` 会生成 DB 副本与 manifest，但没有「从备份恢复」的代码路径（`library.rs:122-223` 只有创建/列表）。另有 `logs/operations.log` 可作审计。 |
 | 外键完整性 | **已验证声明** | `PRAGMA foreign_keys=ON`（`db.rs:432`），但 `capabilities.current_version_id`、`installations.version_id` 的删除行为依赖 SQLite 默认（无动作），删版本前需自行保证引用一致性。 |
 
@@ -339,21 +435,23 @@ erDiagram
 
 ## 9. 迁移策略（面向后续版本）
 
-当前实现（`db.rs:444-455`）：
+当前实现（`db.rs:509-530`）：
 
 ```text
 version = PRAGMA user_version
 if version < 1:
-    BEGIN
-    execute_batch(SCHEMA_V1)
-    PRAGMA user_version = 1
-    COMMIT
+    BEGIN; execute_batch(SCHEMA_V1); PRAGMA user_version=1; COMMIT
+version = PRAGMA user_version
+if version < 2:
+    BEGIN; execute_batch(SCHEMA_V2); PRAGMA user_version=2; COMMIT
 ```
 
-约定（建议，尚未有 v2 代码）：
+约定（已用于 v2，后续沿用）：
 
-1. 每个版本一个 `if version < N { ... }` 分支，**只前进、不降级**；旧版本 DB 打开时自动升级。
+1. 每个版本一个 `if version < N { ... }` 分支，**只前进、不降级**；旧版本 DB 打开时自动升级（v1→v2 已实现）。
 2. 迁移必须在事务内完成；DDL 失败整体回滚。
-3. 升级前自动创建 `backups/` 快照（当前未实现，属于待办）。
+3. 升级前自动创建 `backups/` 快照（当前未实现，属于待办）；真实 Mac 已验证 v1→v2。
 4. 任何破坏性列变更采用「新表 + 数据搬迁 + 改名」，不要直接 `DROP COLUMN`。
 5. `doctor()` 已用 `PRAGMA integrity_check` 做健康检查（`service.rs:1537-1556`），可作为迁移后的验收手段。
+
+> 验证平台数据语义见 [VALIDATION.md](VALIDATION.md)。

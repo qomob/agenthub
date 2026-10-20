@@ -305,6 +305,81 @@ fn mcp_delete_secret(
 }
 
 // ---------------------------------------------------------------------------
+// Capability health, audits and validation evidence
+// ---------------------------------------------------------------------------
+
+#[tauri::command(rename_all = "snake_case")]
+fn skills_audit(
+    state: State<'_, AppState>,
+    request: AuditRequest,
+) -> Result<CapabilityAudit, String> {
+    state.run(|hub| hub.audit_skill(request))
+}
+
+#[tauri::command(rename_all = "snake_case")]
+fn skills_dependencies(
+    state: State<'_, AppState>,
+    request: AuditRequest,
+) -> Result<DependencyReport, String> {
+    state.run(|hub| hub.skill_dependencies(request))
+}
+
+#[tauri::command(rename_all = "snake_case")]
+fn skills_audit_history(
+    state: State<'_, AppState>,
+    capability_id: String,
+    limit: Option<usize>,
+) -> Result<Vec<CapabilityAudit>, String> {
+    state.run(|hub| hub.list_audits(&capability_id, limit.unwrap_or(30)))
+}
+
+#[tauri::command(rename_all = "snake_case")]
+fn skills_preview_update(
+    state: State<'_, AppState>,
+    request: ImpactRequest,
+) -> Result<UpdateImpact, String> {
+    state.run(|hub| hub.preview_update(request))
+}
+
+#[tauri::command(rename_all = "snake_case")]
+fn skills_health(
+    state: State<'_, AppState>,
+    capability_id: String,
+) -> Result<CapabilityHealth, String> {
+    state.run(|hub| hub.skill_health(&capability_id))
+}
+
+#[tauri::command(rename_all = "snake_case")]
+fn health_overview(state: State<'_, AppState>) -> Result<HealthOverview, String> {
+    state.run(|hub| hub.health_overview())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+fn validations_list(
+    state: State<'_, AppState>,
+    capability_id: String,
+    limit: Option<usize>,
+) -> Result<Vec<ValidationRun>, String> {
+    state.run(|hub| hub.list_validations(&capability_id, limit.unwrap_or(100)))
+}
+
+#[tauri::command(rename_all = "snake_case")]
+fn validations_record(
+    state: State<'_, AppState>,
+    request: ValidationRequest,
+) -> Result<ValidationRun, String> {
+    state.run(|hub| hub.record_validation(request))
+}
+
+#[tauri::command(rename_all = "snake_case")]
+fn agent_health(
+    state: State<'_, AppState>,
+    record: bool,
+) -> Result<AgentHealthReport, String> {
+    state.run(|hub| hub.agent_health_report(record))
+}
+
+// ---------------------------------------------------------------------------
 // Plugins & profiles
 // ---------------------------------------------------------------------------
 
@@ -364,6 +439,15 @@ pub fn run() {
             skills_import,
             skills_plan_install,
             skills_plan_uninstall,
+            skills_audit,
+            skills_dependencies,
+            skills_audit_history,
+            skills_preview_update,
+            skills_health,
+            health_overview,
+            validations_list,
+            validations_record,
+            agent_health,
             operations_apply,
             operations_rollback,
             operations_list,

@@ -23,7 +23,13 @@ import {
   toneForSymlinkSupport,
   transportKey,
 } from '../lib/status'
-import type { AgentDoctorCheck, AgentView, DoctorReport } from '../lib/types'
+import type {
+  AgentDoctorCheck,
+  AgentHealth,
+  AgentHealthReport,
+  AgentView,
+  DoctorReport,
+} from '../lib/types'
 import { useAppStore } from '../stores/app'
 import { useUiStore } from '../stores/ui'
 
@@ -47,6 +53,13 @@ const doctor = ref<DoctorReport | null>(null)
 const doctorLoading = ref(false)
 const doctorError = ref<string | null>(null)
 
+const healthReport = ref<AgentHealthReport | null>(null)
+const healthLoading = ref(false)
+const healthError = ref<string | null>(null)
+const healthByKey = computed(
+  () => new Map((healthReport.value?.agents ?? []).map((item) => [item.agentKey, item])),
+)
+
 const doctorCheck = computed<AgentDoctorCheck | null>(() => {
   if (!doctor.value || !activeAgent.value) return null
   return doctor.value.agents.find((item) => item.key === activeAgent.value?.key) ?? null
@@ -54,6 +67,7 @@ const doctorCheck = computed<AgentDoctorCheck | null>(() => {
 
 onMounted(async () => {
   await reloadAgents()
+  void loadAgentHealth(false)
   const key = typeof route.query.agent === 'string' ? route.query.agent : null
   if (key) {
     const agent = app.agents.find((item) => item.key === key)
@@ -81,6 +95,48 @@ async function reloadAgents(): Promise<void> {
   } finally {
     loading.value = false
   }
+}
+
+/** Read (record=false) or record (record=true) the detected agent versions/paths. */
+async function loadAgentHealth(record: boolean): Promise<void> {
+  healthLoading.value = true
+  healthError.value = null
+  try {
+    healthReport.value = await api.agentHealth(record)
+    if (record) {
+      const changed = healthReport.value.agents.filter((item) => item.versionChanged).length
+      ui.notify('success', t('agents.recheckVersionDone'), {
+        detail:
+          changed > 0
+            ? t('agents.versionChangedCount', { count: changed })
+            : t('agents.recheckVersionNoChange'),
+      })
+    }
+  } catch (err) {
+    healthError.value = normalizeError(err, t('errors.agentHealthFailed'))
+  } finally {
+    healthLoading.value = false
+  }
+}
+
+function agentHealthFor(agent: AgentView): AgentHealth | null {
+  return healthByKey.value.get(agent.key) ?? null
+}
+
+function agentVersionLabel(agent: AgentView): string {
+  const entry = agentHealthFor(agent)
+  if (!entry) return t('agents.versionNotDetected')
+  return entry.version || t('agents.versionNotDetected')
+}
+
+function agentPathsLabel(agent: AgentView): string {
+  const entry = agentHealthFor(agent)
+  if (!entry) return t('agents.pathsUnknown')
+  return entry.pathsOk ? t('agents.pathsOk') : t('agents.pathsNotOk')
+}
+
+function agentVersionChanged(agent: AgentView): boolean {
+  return agentHealthFor(agent)?.versionChanged ?? false
 }
 
 function syncForm(agent: AgentView): void {
@@ -205,6 +261,11 @@ function isReadOnlyRoot(source: string): boolean {
   <div class="page">
     <PageHeader :title="t('agents.title')" :subtitle="t('agents.subtitle')">
       <template #actions>
+        <button type="button" class="btn" :disabled="healthLoading" @click="loadAgentHealth(true)">
+          <span v-if="healthLoading" class="spinner spinner-sm" aria-hidden="true" />
+          <Icon v-else name="shield" :size="13" />
+          {{ t('agents.recheckVersion') }}
+        </button>
         <button type="button" class="btn" :disabled="refreshing" @click="reloadAgents">
           <span v-if="refreshing" class="spinner spinner-sm" aria-hidden="true" />
           <Icon v-else name="refresh" :size="13" />
@@ -282,6 +343,45 @@ function isReadOnlyRoot(source: string): boolean {
               <span class="badge badge-outline">
                 {{ t('agents.skillRoots') }}: {{ rootSummary(agent) }}
               </span>
+            </div>
+
+            <div class="stack-sm">
+              <div v-if="agentHealthFor(agent)" class="row row-wrap" style="gap: 5px">
+                <StatusBadge
+                  :label="`${t('agents.version')}：${agentVersionLabel(agent)}`"
+                  :tone="agentHealthFor(agent)?.version ? 'success' : 'neutral'"
+                  :icon="agentHealthFor(agent)?.version ? 'check-circle' : 'alert-circle'"
+                />
+                <StatusBadge
+                  :label="agentPathsLabel(agent)"
+                  :tone="agentHealthFor(agent)?.pathsOk ? 'success' : 'warn'"
+                  :icon="agentHealthFor(agent)?.pathsOk ? 'check-circle' : 'alert-triangle'"
+                />
+                <StatusBadge
+                  v-if="agentVersionChanged(agent)"
+                  :label="t('agents.versionChanged')"
+                  tone="warn"
+                  icon="alert-triangle"
+                />
+              </div>
+              <p v-else-if="healthLoading" class="hint">{{ t('agents.versionChecking') }}</p>
+              <p v-else class="hint">
+                {{ healthError ? t('agents.versionUnknown') : t('agents.versionNotDetected') }}
+              </p>
+              <p v-if="agentVersionChanged(agent)" class="hint tone-warn">
+                {{
+                  t('agents.versionChangedWarning', {
+                    previous: agentHealthFor(agent)?.previousVersion ?? '—',
+                    version: agentVersionLabel(agent),
+                  })
+                }}
+              </p>
+              <p
+                v-if="agentHealthFor(agent) && !agentHealthFor(agent)?.pathsOk"
+                class="hint tone-warn"
+              >
+                {{ t('agents.pathsNotOkHint') }}
+              </p>
             </div>
 
             <div class="stack-sm">
@@ -364,6 +464,77 @@ function isReadOnlyRoot(source: string): boolean {
             {{ t('agents.openMatrix') }}
           </RouterLink>
         </div>
+
+        <section>
+          <p class="section-title">{{ t('agents.versionHealth') }}</p>
+          <LoadingState v-if="healthLoading" :label="t('agents.versionChecking')" compact />
+          <ErrorBanner
+            v-else-if="healthError"
+            :message="healthError"
+            :title="t('errors.agentHealthFailed')"
+            :retry-label="t('common.retry')"
+            @retry="loadAgentHealth(false)"
+          />
+          <div v-else class="stack-sm">
+            <div class="row row-wrap" style="gap: 5px">
+              <StatusBadge
+                :label="`${t('agents.version')}：${agentVersionLabel(activeAgent)}`"
+                :tone="agentHealthFor(activeAgent)?.version ? 'success' : 'neutral'"
+                :icon="agentHealthFor(activeAgent)?.version ? 'check-circle' : 'alert-circle'"
+              />
+              <StatusBadge
+                :label="agentPathsLabel(activeAgent)"
+                :tone="agentHealthFor(activeAgent)?.pathsOk ? 'success' : 'warn'"
+                :icon="agentHealthFor(activeAgent)?.pathsOk ? 'check-circle' : 'alert-triangle'"
+              />
+              <StatusBadge
+                v-if="agentVersionChanged(activeAgent)"
+                :label="t('agents.versionChanged')"
+                tone="warn"
+                icon="alert-triangle"
+              />
+            </div>
+            <p v-if="agentHealthFor(activeAgent)?.checkedAt" class="hint">
+              {{ t('agents.checkedAt') }}：{{ formatDateTime(agentHealthFor(activeAgent)?.checkedAt ?? null, locale) }}
+            </p>
+            <p v-if="agentVersionChanged(activeAgent)" class="hint tone-warn">
+              {{
+                t('agents.versionChangedWarning', {
+                  previous: agentHealthFor(activeAgent)?.previousVersion ?? '—',
+                  version: agentVersionLabel(activeAgent),
+                })
+              }}
+            </p>
+            <p v-if="agentHealthFor(activeAgent)?.previousVersion && !agentVersionChanged(activeAgent)" class="hint">
+              {{ t('agents.previousVersion') }}：{{ agentHealthFor(activeAgent)?.previousVersion }}
+            </p>
+            <ul
+              v-if="(agentHealthFor(activeAgent)?.notes.length ?? 0) > 0"
+              class="list-reset stack-sm"
+            >
+              <li
+                v-for="(note, index) in agentHealthFor(activeAgent)?.notes ?? []"
+                :key="index"
+                class="hint"
+              >
+                • {{ note }}
+              </li>
+            </ul>
+            <p v-if="!agentHealthFor(activeAgent)" class="hint">{{ t('agents.versionNotDetected') }}</p>
+            <button
+              type="button"
+              class="btn btn-sm"
+              :disabled="healthLoading"
+              @click="loadAgentHealth(true)"
+            >
+              <span v-if="healthLoading" class="spinner spinner-sm" aria-hidden="true" />
+              <Icon v-else name="shield" :size="12" />
+              {{ t('agents.recheckVersion') }}
+            </button>
+          </div>
+        </section>
+
+        <hr class="divider" />
 
         <section>
           <p class="section-title">{{ t('agents.editPaths') }}</p>

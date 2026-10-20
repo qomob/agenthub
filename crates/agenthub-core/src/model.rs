@@ -1073,3 +1073,244 @@ pub struct SecretState {
     pub key: String,
     pub present: bool,
 }
+
+// ---------------------------------------------------------------------------
+// Capability health, audits, dependency diagnostics, validation evidence
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HealthState {
+    Verified,
+    Unverified,
+    NeedsAttention,
+    Failed,
+    NotDeployed,
+}
+
+impl HealthState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            HealthState::Verified => "verified",
+            HealthState::Unverified => "unverified",
+            HealthState::NeedsAttention => "needs_attention",
+            HealthState::Failed => "failed",
+            HealthState::NotDeployed => "not_deployed",
+        }
+    }
+
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "verified" => HealthState::Verified,
+            "needs_attention" => HealthState::NeedsAttention,
+            "failed" => HealthState::Failed,
+            "not_deployed" => HealthState::NotDeployed,
+            _ => HealthState::Unverified,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditFinding {
+    /// Stable deterministic rule id, e.g. `script.pipe_to_shell`.
+    pub id: String,
+    /// info | low | medium | high | critical
+    pub severity: String,
+    /// spec | security | dependency | quality | compatibility
+    pub category: String,
+    pub title: String,
+    pub detail: String,
+    pub path: Option<String>,
+    pub suggestion: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilityAudit {
+    pub id: String,
+    pub capability_id: String,
+    pub version_id: String,
+    pub version_label: String,
+    /// static | environment
+    pub kind: String,
+    /// pass | warn | fail | unknown
+    pub status: String,
+    /// low | medium | high | critical
+    pub risk: String,
+    pub summary: String,
+    pub findings: Vec<AuditFinding>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DependencyItem {
+    pub name: String,
+    /// runtime | binary | manifest | mcp | credential | package
+    pub kind: String,
+    pub required_version: Option<String>,
+    pub found: Option<String>,
+    /// ok | missing | warning | unknown
+    pub status: String,
+    pub detail: String,
+    pub source_path: Option<String>,
+    pub suggestion: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DependencyReport {
+    pub capability_id: String,
+    pub version_id: String,
+    /// healthy | needs_attention | unknown
+    pub status: String,
+    pub risk: String,
+    pub summary: String,
+    pub items: Vec<DependencyItem>,
+    pub checked_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileChange {
+    pub path: String,
+    /// added | removed | modified
+    pub change: String,
+    pub size_before: i64,
+    pub size_after: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateImpact {
+    pub id: String,
+    pub capability_id: String,
+    pub from_version_id: String,
+    pub from_version_label: String,
+    pub to_version_id: String,
+    pub to_version_label: String,
+    pub risk: String,
+    pub summary: String,
+    pub file_changes: Vec<FileChange>,
+    /// e.g. docs_only, new_script, removed_script, new_network, new_dependency
+    pub classes: Vec<String>,
+    pub findings: Vec<AuditFinding>,
+    pub affected_installation_count: usize,
+    pub affected_agent_keys: Vec<String>,
+    pub affected_project_roots: Vec<String>,
+    pub requires_revalidation: bool,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ValidationRun {
+    pub id: String,
+    pub capability_id: String,
+    pub version_id: String,
+    pub version_label: String,
+    pub agent_id: Option<String>,
+    pub agent_key: Option<String>,
+    pub agent_name: Option<String>,
+    /// manual | static | environment | regression
+    pub kind: String,
+    /// passed | failed | needs_attention | unverified
+    pub status: String,
+    pub case_name: String,
+    pub notes: String,
+    pub evidence: String,
+    pub actor: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ValidationRequest {
+    pub capability_id: String,
+    pub version_id: Option<String>,
+    pub agent_id: Option<String>,
+    pub kind: Option<String>,
+    /// passed | failed | needs_attention | unverified
+    pub status: String,
+    pub case_name: String,
+    pub notes: Option<String>,
+    pub evidence: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilityHealth {
+    pub capability_id: String,
+    pub slug: String,
+    pub name: String,
+    pub description: String,
+    pub version_label: String,
+    pub status: HealthState,
+    pub reasons: Vec<String>,
+    pub audit: Option<CapabilityAudit>,
+    pub environment: Option<DependencyReport>,
+    pub validations: Vec<ValidationRun>,
+    pub installation_count: usize,
+    pub agent_keys: Vec<String>,
+    pub verified_agent_keys: Vec<String>,
+    pub last_checked_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HealthSummary {
+    pub total: usize,
+    pub verified: usize,
+    pub unverified: usize,
+    pub needs_attention: usize,
+    pub failed: usize,
+    pub not_deployed: usize,
+    pub last_checked_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HealthOverview {
+    pub summary: HealthSummary,
+    pub capabilities: Vec<CapabilityHealth>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentHealth {
+    pub agent_id: String,
+    pub agent_key: String,
+    pub agent_name: String,
+    pub status: AgentStatus,
+    pub version: Option<String>,
+    pub previous_version: Option<String>,
+    pub version_changed: bool,
+    pub version_changed_at: Option<String>,
+    pub paths_ok: bool,
+    pub notes: Vec<String>,
+    pub checked_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentHealthReport {
+    pub checked_at: String,
+    pub agents: Vec<AgentHealth>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditRequest {
+    pub capability_id: String,
+    pub version_id: Option<String>,
+    pub kind: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImpactRequest {
+    pub capability_id: String,
+    pub from_version_id: Option<String>,
+    pub to_version_id: String,
+}

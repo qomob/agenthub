@@ -878,6 +878,10 @@ a.stat-card:hover {
   color: var(--ah-info);
 }
 
+.stat-tone-slate .stat-value {
+  color: var(--ah-info);
+}
+
 .badge {
   display: inline-flex;
   align-items: center;
@@ -928,6 +932,11 @@ a.stat-card:hover {
 .badge-accent {
   background: var(--ah-accent-soft);
   color: var(--ah-accent);
+}
+
+.badge-slate {
+  background: var(--ah-neutral-soft);
+  color: var(--ah-info);
 }
 
 .badge-outline {

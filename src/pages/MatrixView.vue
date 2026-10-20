@@ -13,7 +13,7 @@ import StatusBadge from '../components/StatusBadge.vue'
 import { api, normalizeError } from '../lib/api'
 import { formatRelativeTime } from '../lib/format'
 import { matrixCellState } from '../lib/status'
-import type { AgentView, InstallStrategy, OperationPlan, Skill } from '../lib/types'
+import type { AgentView, InstallStrategy, OperationPlan, Skill, UpdateImpact } from '../lib/types'
 import { useAppStore } from '../stores/app'
 import { useSkillsStore } from '../stores/skills'
 import { useUiStore } from '../stores/ui'
@@ -32,6 +32,7 @@ const selected = ref<Set<string>>(new Set())
 const plans = ref<OperationPlan[] | null>(null)
 const planning = ref(false)
 const planError = ref<string | null>(null)
+const impacts = ref<UpdateImpact[]>([])
 
 const skills = computed(() => store.skills)
 const agents = computed(() => app.agents)
@@ -106,8 +107,35 @@ function selectedPairs(): SelectedPair[] {
   return pairs
 }
 
+/**
+ * For every selected cell whose installed version differs from the version the
+ * plan will install, ask the engine for an update-impact preview and surface it
+ * before the PlanDialog. Distinct (skill, fromVersion) pairs are requested once.
+ */
+async function collectUpdateImpacts(pairs: SelectedPair[]): Promise<UpdateImpact[]> {
+  const seen = new Set<string>()
+  const collected: UpdateImpact[] = []
+  for (const { skill, agent } of pairs) {
+    if (!matrixCellState(skill, agent).selectableForInstall) continue
+    const installation = skill.installations.find((item) => item.agentId === agent.id)
+    if (!installation || installation.versionId === skill.currentVersionId) continue
+    const key = `${skill.id}::${installation.versionId}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    collected.push(
+      await api.skillsPreviewUpdate({
+        capabilityId: skill.id,
+        fromVersionId: installation.versionId,
+        toVersionId: skill.currentVersionId,
+      }),
+    )
+  }
+  return collected
+}
+
 async function generatePlans(): Promise<void> {
   planError.value = null
+  impacts.value = []
   const pairs = selectedPairs()
   if (pairs.length === 0) {
     planError.value = t('matrix.nothingSelected')
@@ -140,6 +168,7 @@ async function generatePlans(): Promise<void> {
       planError.value = t('matrix.noAgentsSelected')
       return
     }
+    const impactList = await collectUpdateImpacts(pairs)
     const created: OperationPlan[] = []
     for (const [capabilityId, agentIds] of grouped) {
       const plan = await api.planInstall({
@@ -151,12 +180,18 @@ async function generatePlans(): Promise<void> {
       })
       created.push(plan)
     }
+    impacts.value = impactList
     plans.value = created
   } catch (err) {
     planError.value = normalizeError(err, t('errors.planFailed'))
   } finally {
     planning.value = false
   }
+}
+
+function closePlans(): void {
+  plans.value = null
+  impacts.value = []
 }
 
 async function refreshSkills(): Promise<void> {
@@ -393,6 +428,12 @@ function switchMode(next: Mode): void {
       <p v-if="agents.length > 0" class="hint">{{ t('matrix.planHint') }}</p>
     </div>
 
-    <PlanDialog v-if="plans" :plans="plans" @close="plans = null" @applied="afterApplied" />
+    <PlanDialog
+      v-if="plans"
+      :plans="plans"
+      :impacts="impacts"
+      @close="closePlans"
+      @applied="afterApplied"
+    />
   </div>
 </template>

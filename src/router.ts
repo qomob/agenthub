@@ -4,6 +4,7 @@ import { i18n } from './i18n'
 import ActivityView from './pages/ActivityView.vue'
 import AgentsView from './pages/AgentsView.vue'
 import DashboardView from './pages/DashboardView.vue'
+import HealthView from './pages/HealthView.vue'
 import MatrixView from './pages/MatrixView.vue'
 import McpView from './pages/McpView.vue'
 import PluginsView from './pages/PluginsView.vue'
@@ -18,7 +19,7 @@ export interface NavItem {
   labelKey: string
   icon: string
   shortcut?: string
-  group: 'overview' | 'capabilities' | 'workspace' | 'system'
+  group: 'overview' | 'capabilities' | 'workspace' | 'validation' | 'system'
 }
 
 /** Shared by the sidebar and the Cmd+1..9 shortcuts (order matters). */
@@ -88,11 +89,18 @@ export const navItems: NavItem[] = [
     group: 'workspace',
   },
   {
+    path: '/health',
+    name: 'health',
+    labelKey: 'nav.health',
+    icon: 'shield',
+    shortcut: '9',
+    group: 'validation',
+  },
+  {
     path: '/settings',
     name: 'settings',
     labelKey: 'nav.settings',
     icon: 'settings',
-    shortcut: '9',
     group: 'system',
   },
 ]
@@ -147,6 +155,12 @@ const routes: RouteRecordRaw[] = [
     name: 'activity',
     component: ActivityView,
     meta: { titleKey: 'nav.activity' },
+  },
+  {
+    path: '/health',
+    name: 'health',
+    component: HealthView,
+    meta: { titleKey: 'nav.health' },
   },
   {
     path: '/settings',

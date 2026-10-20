@@ -5,14 +5,18 @@ import { useRouter } from 'vue-router'
 
 import { api, normalizeError } from '../lib/api'
 import { operationKindKey, planHasBlockedItems, planNeedsForce } from '../lib/status'
-import type { OperationPlan, OperationResult } from '../lib/types'
+import type { OperationPlan, OperationResult, UpdateImpact } from '../lib/types'
 import { useUiStore } from '../stores/ui'
 import BaseModal from './BaseModal.vue'
 import Icon from './Icon.vue'
 import OperationResultView from './OperationResultView.vue'
 import PlanPreview from './PlanPreview.vue'
+import UpdateImpactSummary from './UpdateImpactSummary.vue'
 
-const props = defineProps<{ plans: OperationPlan[] }>()
+const props = withDefaults(
+  defineProps<{ plans: OperationPlan[]; impacts?: UpdateImpact[] }>(),
+  { impacts: () => [] },
+)
 const emit = defineEmits<{ close: []; applied: [] }>()
 
 const { t } = useI18n()
@@ -82,6 +86,17 @@ function onClose(): void {
       <div v-if="multi" class="notice notice-info">
         <Icon class="notice-icon" name="info" :size="14" />
         <p>{{ t('plan.multiPlanHint') }}</p>
+      </div>
+
+      <div v-if="impacts.length > 0" class="surface-inset stack-sm" style="padding: 11px">
+        <div>
+          <p class="card-title">{{ t('plan.impactTitle') }}</p>
+          <p class="card-subtitle">{{ t('plan.impactLead') }}</p>
+        </div>
+        <UpdateImpactSummary v-for="impact in impacts" :key="impact.id" :impact="impact" />
+        <p v-if="impacts.some((impact) => impact.requiresRevalidation)" class="hint tone-warn">
+          {{ t('plan.impactRequiresRevalidation') }}
+        </p>
       </div>
 
       <p v-if="hasBlocked" class="notice notice-warn">

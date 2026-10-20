@@ -13,6 +13,7 @@
 4. 写入统一由 `ops`/`mcp` 完成；adapter 不碰文件。因此「新增 Agent」= 实现 trait + 注册 + 补证据 + 补测试，不需要改执行器。
 5. **已验证实现**：DSH 的 `symlink_support` 已按本机证据改为 `Supported`（`builtin.rs:725-729`），因此 DSH 目标使用 symlink 时不会再被降级为 copy。
 6. **未闭合风险**：Codex 的 `detect()` 只检查 `~/.codex` 或 `Codex.app` 是否存在，**没有按 `CFBundleName` 区分** ChatGPT.app 与 Codex.app；兼容性报告 §0.8 指出的同 bundle id 风险尚未在代码里闭合（`builtin.rs:118-125`）。
+7. **Agent Health 版本探测与 adapter 分离**：`agent_health.rs` 只读 `.app`/CLI 版本，不依赖 adapter 的路径声明；探测失败返回未知，不伪造。详见 §3.5。
 
 ---
 
@@ -160,6 +161,40 @@ resolved_mcp_targets(home):
 
 ---
 
+### 3.5 Agent Health 版本探测（`agent_health.rs`）
+
+| 探测方式 | 适用 | 实现 | 限制 |
+|---|---|---|---|
+| `.app` bundle | 有 app bundle 的 Agent（ChatGPT/Codex/TRAE CN/WorkBuddy/ZCode/DSH 等） | `Contents/Info.plist` 的 `CFBundleShortVersionString`：`plutil -extract ... raw` → XML 解析 → `mdls -name kMDItemVersion` 兜底 | bundle 必须存在；版本字段缺失 → None；**不猜测** |
+| CLI `--version` | DSH 等有 CLI 的 Agent（且 app 无版本时 fallback） | PATH + `/opt/homebrew/bin` + `/usr/local/bin` 查找可执行；`--version`，**2s 超时**；读取 stdout/stderr 第一个版本 token | CLI 输出格式差异/不输出版本 → None |
+| 无 | TRAE 国际（仅配置残留）、Claude Code/Cursor（无版本来源） | 返回 None | 显示未知，不伪造 |
+
+**版本变化语义**
+
+1. 首次观测写入 baseline（`changed=false`），不算变更。
+2. 后续版本与上一条不同 → `changed=true`、`previousVersion` 保留旧值，notes 提示「重新扫描 + 重新记录验证证据」。
+3. 同一秒多次写入使用 `detected_at DESC, rowid DESC` 决胜（QA 发现的 same-second ordering bug 已修复，有回归测试）。
+4. `health --agents` 只读；`health --agents --record` 写入一条观测。
+
+**真实验收值（2026-10-20，`/tmp/agenthub-validator-real/agents.json`）**
+
+| Agent | 版本 | 来源 |
+|---|---|---|
+| ChatGPT | `26.1013.40934` | `/Applications/ChatGPT.app` |
+| Codex | `26.623.70822` | 旧 `Codex.app`（与 ChatGPT 同 bundle id 的兼容副本） |
+| DeepSeek Harness | `0.2.1-rc.2` | `dsh --version` fallback |
+| TRAE CN | `3.4.4` | app bundle |
+| WorkBuddy | `5.8.3` | app bundle |
+| ZCode | `3.16.2` | app bundle |
+| TRAE (International) | 无 | 仅配置残留 |
+| Claude Code / Cursor | 无 | 无版本来源 |
+
+**与验证状态的关系**：Agent 版本变化本身不改变 `HealthState`，但会提示重新扫描/重新记录验证证据；人工证据按 **capability version + agent** 绑定，Agent 升级后需重新验证。封闭 Agent 无法自动 E2E，只能用 manual evidence（`kind=manual, status=passed`）。
+
+**探测失败处理**：返回 `version=None`、`changed=false`，UI 显示「未检测到版本」；不得用 app 名称/路径猜测版本。
+
+---
+
 ## 4. 新增 Agent 的步骤与验收清单
 
 ### 4.1 步骤
@@ -288,13 +323,14 @@ resolved_mcp_targets(home):
 
 ## 8.5 状态标记（已验证 / 未验证 / 已知限制）
 
-- **已验证**：trait 契约与执行分离；9 个 adapter 的 id/key/roots/格式由代码定义；Codex/WorkBuddy 的发现与 MCP 写入路径有集成测试；DSH symlink 声明已与证据一致；真实 Mac 验收覆盖 Codex/ZCode 分发与扫描。
-- **未验证**：Codex 项目级根、Trae CN 项目根、ZCode 远程传输/原生项目配置、WorkBuddy `staticHeaders`、Claude/Cursor 实际安装、非 DSH symlink 行为。
-- **已知限制**：代码不调用任何 Agent CLI（无 native 管理）；ChatGPT 只读；同名 app 未按 CFBundleName 区分；MCP 删除留空表；见 §8。
+- **已验证**：trait 契约与执行分离；9 个 adapter 的 id/key/roots/格式由代码定义；Codex/WorkBuddy 的发现与 MCP 写入路径有集成测试；DSH symlink 声明已与证据一致；真实 Mac 验收覆盖 Codex/ZCode 分发与扫描；Agent Health 真实读出 6 个 Agent 版本。
+- **未验证**：Codex 项目级根、Trae CN 项目根、ZCode 远程传输/原生项目配置、WorkBuddy `staticHeaders`、Claude/Cursor 实际安装、非 DSH symlink 行为；TRAE 国际/Claude/Cursor 无版本来源。
+- **已知限制**：代码不调用任何 Agent 管理 CLI（无 native 管理；只执行版本 `--version`）；ChatGPT 只读；同名 app 未按 CFBundleName 区分；MCP 删除留空表；见 §8。
 
 ## 9. 交叉链接
 
 - 兼容性总表与证据：[AGENT-COMPATIBILITY.md](AGENT-COMPATIBILITY.md)、[compat-evidence/README.md](compat-evidence/README.md)
 - 规范依据（Agent Skills / MCP / 各 Agent 官方文档）：[REFERENCE-STUDY.md](REFERENCE-STUDY.md)
 - 写入事务与快照：[ARCHITECTURE.md §3](ARCHITECTURE.md)
+- 验证方法论：[VALIDATION.md](VALIDATION.md)
 - 安全边界：[SECURITY.md](SECURITY.md)

@@ -21,7 +21,7 @@ import {
   severityKey,
   toneForSeverity,
 } from '../lib/status'
-import type { ChangeCheck, Issue } from '../lib/types'
+import type { ChangeCheck, HealthOverview, Issue } from '../lib/types'
 import { useAppStore } from '../stores/app'
 import { useUiStore } from '../stores/ui'
 
@@ -38,12 +38,18 @@ const changes = ref<ChangeCheck | null>(null)
 const checkingChanges = ref(false)
 const stats = computed(() => dashboard.value?.stats ?? null)
 
+const healthOverview = ref<HealthOverview | null>(null)
+const healthLoading = ref(false)
+const healthError = ref<string | null>(null)
+const health = computed(() => healthOverview.value?.summary ?? null)
+
 const issues = computed(() => dashboard.value?.issues ?? [])
 const updates = computed(() => dashboard.value?.updates ?? [])
 const recentOperations = computed(() => dashboard.value?.recentOperations ?? [])
 const agents = computed(() => dashboard.value?.agents ?? [])
 
 onMounted(async () => {
+  void loadHealth()
   try {
     await app.loadDashboard()
   } catch (err) {
@@ -51,7 +57,20 @@ onMounted(async () => {
   }
 })
 
+async function loadHealth(): Promise<void> {
+  healthLoading.value = true
+  healthError.value = null
+  try {
+    healthOverview.value = await api.healthOverview()
+  } catch (err) {
+    healthError.value = normalizeError(err, t('errors.healthFailed'))
+  } finally {
+    healthLoading.value = false
+  }
+}
+
 async function refresh(): Promise<void> {
+  void loadHealth()
   try {
     await app.loadDashboard(true)
   } catch (err) {
@@ -227,6 +246,59 @@ function openOperation(id: string): void {
             icon="activity"
             :tone="(stats?.warnings ?? 0) > 0 ? 'danger' : 'neutral'"
           />
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <p class="card-title">{{ t('dashboard.healthTitle') }}</p>
+              <p class="card-subtitle">
+                <template v-if="health?.lastCheckedAt">
+                  {{ t('health.lastChecked') }}：{{ formatRelativeTime(health.lastCheckedAt, locale) }}
+                </template>
+                <template v-else>{{ t('health.neverChecked') }}</template>
+              </p>
+            </div>
+            <RouterLink :to="{ name: 'health' }" class="btn-link">
+              {{ t('dashboard.viewHealth') }}
+            </RouterLink>
+          </div>
+          <div class="card-body stack-sm">
+            <ErrorBanner
+              v-if="healthError"
+              :message="healthError"
+              :title="t('errors.healthFailed')"
+              :retry-label="t('common.retry')"
+              :retrying="healthLoading"
+              @retry="loadHealth"
+            />
+            <LoadingState
+              v-else-if="healthLoading && !healthOverview"
+              :label="t('health.loading')"
+              compact
+            />
+            <div v-else-if="health" class="row row-wrap" style="gap: 5px">
+              <span class="badge badge-outline">
+                {{ t('dashboard.healthTotal', { count: health.total }) }}
+              </span>
+              <span class="badge badge-success">
+                {{ t('dashboard.healthVerified', { count: health.verified }) }}
+              </span>
+              <span class="badge" :class="health.needsAttention > 0 ? 'badge-warn' : 'badge-neutral'">
+                {{ t('dashboard.healthNeedsAttention', { count: health.needsAttention }) }}
+              </span>
+              <span class="badge badge-neutral">
+                {{ t('dashboard.healthUnverified', { count: health.unverified }) }}
+              </span>
+              <span class="badge" :class="health.failed > 0 ? 'badge-danger' : 'badge-neutral'">
+                {{ t('dashboard.healthFailed', { count: health.failed }) }}
+              </span>
+              <span class="badge badge-slate">
+                {{ t('dashboard.healthNotDeployed', { count: health.notDeployed }) }}
+              </span>
+            </div>
+            <p class="hint">{{ t('dashboard.healthHint') }}</p>
+          </div>
         </div>
 
         <div v-if="changes" class="card">

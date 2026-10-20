@@ -18,7 +18,7 @@ import type {
   SymlinkSupport,
 } from './types'
 
-export type Tone = 'neutral' | 'success' | 'warn' | 'danger' | 'info' | 'accent'
+export type Tone = 'neutral' | 'success' | 'warn' | 'danger' | 'info' | 'accent' | 'slate'
 
 export const agentStatusKey: Record<AgentStatus, string> = {
   installed: 'status.agent.installed',

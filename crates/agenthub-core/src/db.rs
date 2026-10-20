@@ -192,6 +192,71 @@ CREATE TABLE scan_results (
 CREATE INDEX idx_scan_agent ON scan_results(agent_id);
 "#;
 
+const SCHEMA_V2: &str = r#"
+CREATE TABLE capability_audits (
+  id TEXT PRIMARY KEY,
+  capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+  version_id TEXT NOT NULL REFERENCES capability_versions(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  status TEXT NOT NULL,
+  risk TEXT NOT NULL,
+  summary TEXT NOT NULL DEFAULT '',
+  findings TEXT NOT NULL DEFAULT '[]',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX idx_audits_capability ON capability_audits(capability_id, version_id, created_at DESC);
+
+CREATE TABLE dependency_reports (
+  id TEXT PRIMARY KEY,
+  capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+  version_id TEXT NOT NULL REFERENCES capability_versions(id) ON DELETE CASCADE,
+  status TEXT NOT NULL,
+  risk TEXT NOT NULL,
+  summary TEXT NOT NULL DEFAULT '',
+  items TEXT NOT NULL DEFAULT '[]',
+  checked_at TEXT NOT NULL
+);
+CREATE INDEX idx_deps_capability ON dependency_reports(capability_id, version_id, checked_at DESC);
+
+CREATE TABLE update_impacts (
+  id TEXT PRIMARY KEY,
+  capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+  from_version_id TEXT NOT NULL,
+  to_version_id TEXT NOT NULL,
+  risk TEXT NOT NULL,
+  summary TEXT NOT NULL DEFAULT '',
+  payload TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX idx_impacts_capability ON update_impacts(capability_id, created_at DESC);
+
+CREATE TABLE validation_runs (
+  id TEXT PRIMARY KEY,
+  capability_id TEXT NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
+  version_id TEXT NOT NULL REFERENCES capability_versions(id) ON DELETE CASCADE,
+  agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+  kind TEXT NOT NULL,
+  status TEXT NOT NULL,
+  case_name TEXT NOT NULL,
+  notes TEXT NOT NULL DEFAULT '',
+  evidence TEXT NOT NULL DEFAULT '',
+  actor TEXT NOT NULL DEFAULT 'user',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX idx_validations_capability ON validation_runs(capability_id, created_at DESC);
+
+CREATE TABLE agent_versions (
+  id TEXT PRIMARY KEY,
+  agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  version TEXT,
+  previous_version TEXT,
+  changed INTEGER NOT NULL DEFAULT 0,
+  evidence TEXT NOT NULL DEFAULT '',
+  detected_at TEXT NOT NULL
+);
+CREATE INDEX idx_agent_versions_agent ON agent_versions(agent_id, detected_at DESC);
+"#;
+
 // ---------------------------------------------------------------------------
 // Internal row structs
 // ---------------------------------------------------------------------------
@@ -450,6 +515,15 @@ impl Database {
             let tx = self.conn.unchecked_transaction()?;
             tx.execute_batch(SCHEMA_V1)?;
             tx.pragma_update(None, "user_version", 1)?;
+            tx.commit()?;
+        }
+        let version: i64 = self
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if version < 2 {
+            let tx = self.conn.unchecked_transaction()?;
+            tx.execute_batch(SCHEMA_V2)?;
+            tx.pragma_update(None, "user_version", 2)?;
             tx.commit()?;
         }
         Ok(())
@@ -1444,5 +1518,377 @@ impl Database {
             })
             .optional()?
             .flatten())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Health / audit / validation persistence
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct AuditRow {
+    pub id: String,
+    pub capability_id: String,
+    pub version_id: String,
+    pub kind: String,
+    pub status: String,
+    pub risk: String,
+    pub summary: String,
+    pub findings: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct DependencyRow {
+    pub id: String,
+    pub capability_id: String,
+    pub version_id: String,
+    pub status: String,
+    pub risk: String,
+    pub summary: String,
+    pub items: String,
+    pub checked_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ImpactRow {
+    pub id: String,
+    pub capability_id: String,
+    pub from_version_id: String,
+    pub to_version_id: String,
+    pub risk: String,
+    pub summary: String,
+    pub payload: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ValidationRow {
+    pub id: String,
+    pub capability_id: String,
+    pub version_id: String,
+    pub agent_id: Option<String>,
+    pub kind: String,
+    pub status: String,
+    pub case_name: String,
+    pub notes: String,
+    pub evidence: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentVersionRow {
+    pub agent_id: String,
+    pub version: Option<String>,
+    pub previous_version: Option<String>,
+    pub changed: bool,
+    pub evidence: String,
+    pub detected_at: String,
+}
+
+impl Database {
+    pub fn insert_audit(&self, row: &AuditRow) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO capability_audits (id, capability_id, version_id, kind, status, risk, summary, findings, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                row.id,
+                row.capability_id,
+                row.version_id,
+                row.kind,
+                row.status,
+                row.risk,
+                row.summary,
+                row.findings,
+                row.created_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn latest_audit(
+        &self,
+        capability_id: &str,
+        version_id: &str,
+        kind: &str,
+    ) -> Result<Option<AuditRow>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id, capability_id, version_id, kind, status, risk, summary, findings, created_at
+                 FROM capability_audits
+                 WHERE capability_id = ?1 AND version_id = ?2 AND kind = ?3
+                 ORDER BY created_at DESC LIMIT 1",
+                params![capability_id, version_id, kind],
+                |row| {
+                    Ok(AuditRow {
+                        id: row.get(0)?,
+                        capability_id: row.get(1)?,
+                        version_id: row.get(2)?,
+                        kind: row.get(3)?,
+                        status: row.get(4)?,
+                        risk: row.get(5)?,
+                        summary: row.get(6)?,
+                        findings: row.get(7)?,
+                        created_at: row.get(8)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    pub fn list_audits(&self, capability_id: &str, limit: usize) -> Result<Vec<AuditRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, capability_id, version_id, kind, status, risk, summary, findings, created_at
+             FROM capability_audits WHERE capability_id = ?1 ORDER BY created_at DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![capability_id, limit as i64], |row| {
+            Ok(AuditRow {
+                id: row.get(0)?,
+                capability_id: row.get(1)?,
+                version_id: row.get(2)?,
+                kind: row.get(3)?,
+                status: row.get(4)?,
+                risk: row.get(5)?,
+                summary: row.get(6)?,
+                findings: row.get(7)?,
+                created_at: row.get(8)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    pub fn insert_dependency_report(&self, row: &DependencyRow) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO dependency_reports (id, capability_id, version_id, status, risk, summary, items, checked_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                row.id,
+                row.capability_id,
+                row.version_id,
+                row.status,
+                row.risk,
+                row.summary,
+                row.items,
+                row.checked_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn latest_dependency_report(
+        &self,
+        capability_id: &str,
+        version_id: &str,
+    ) -> Result<Option<DependencyRow>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id, capability_id, version_id, status, risk, summary, items, checked_at
+                 FROM dependency_reports WHERE capability_id = ?1 AND version_id = ?2
+                 ORDER BY checked_at DESC LIMIT 1",
+                params![capability_id, version_id],
+                |row| {
+                    Ok(DependencyRow {
+                        id: row.get(0)?,
+                        capability_id: row.get(1)?,
+                        version_id: row.get(2)?,
+                        status: row.get(3)?,
+                        risk: row.get(4)?,
+                        summary: row.get(5)?,
+                        items: row.get(6)?,
+                        checked_at: row.get(7)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    pub fn insert_impact(&self, row: &ImpactRow) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO update_impacts (id, capability_id, from_version_id, to_version_id, risk, summary, payload, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                row.id,
+                row.capability_id,
+                row.from_version_id,
+                row.to_version_id,
+                row.risk,
+                row.summary,
+                row.payload,
+                row.created_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn latest_impact(
+        &self,
+        capability_id: &str,
+        from_version_id: &str,
+        to_version_id: &str,
+    ) -> Result<Option<ImpactRow>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id, capability_id, from_version_id, to_version_id, risk, summary, payload, created_at
+                 FROM update_impacts
+                 WHERE capability_id = ?1 AND from_version_id = ?2 AND to_version_id = ?3
+                 ORDER BY created_at DESC LIMIT 1",
+                params![capability_id, from_version_id, to_version_id],
+                |row| {
+                    Ok(ImpactRow {
+                        id: row.get(0)?,
+                        capability_id: row.get(1)?,
+                        from_version_id: row.get(2)?,
+                        to_version_id: row.get(3)?,
+                        risk: row.get(4)?,
+                        summary: row.get(5)?,
+                        payload: row.get(6)?,
+                        created_at: row.get(7)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    pub fn insert_validation_run(&self, row: &ValidationRow) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO validation_runs (id, capability_id, version_id, agent_id, kind, status, case_name, notes, evidence, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                row.id,
+                row.capability_id,
+                row.version_id,
+                row.agent_id,
+                row.kind,
+                row.status,
+                row.case_name,
+                row.notes,
+                row.evidence,
+                row.created_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_validation_runs(&self, capability_id: &str, limit: usize) -> Result<Vec<ValidationRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, capability_id, version_id, agent_id, kind, status, case_name, notes, evidence, created_at
+             FROM validation_runs WHERE capability_id = ?1 ORDER BY created_at DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![capability_id, limit as i64], |row| {
+            Ok(ValidationRow {
+                id: row.get(0)?,
+                capability_id: row.get(1)?,
+                version_id: row.get(2)?,
+                agent_id: row.get(3)?,
+                kind: row.get(4)?,
+                status: row.get(5)?,
+                case_name: row.get(6)?,
+                notes: row.get(7)?,
+                evidence: row.get(8)?,
+                created_at: row.get(9)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Record a detected agent version, keeping history. Returns the row written
+    /// and whether the version differs from the most recent previous observation.
+    pub fn record_agent_version(
+        &self,
+        agent_id: &str,
+        version: Option<&str>,
+        evidence: &str,
+    ) -> Result<AgentVersionRow> {
+        let previous: Option<(Option<String>, String)> = self
+            .conn
+            .query_row(
+                "SELECT version, detected_at FROM agent_versions WHERE agent_id = ?1
+                 ORDER BY detected_at DESC, rowid DESC LIMIT 1",
+                params![agent_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let previous_version = previous.as_ref().and_then(|(version, _)| version.clone());
+        // The first observation is a baseline, not an upgrade.
+        let changed = match (&previous_version, version) {
+            (Some(old), Some(new)) => old != new,
+            _ => false,
+        };
+        let row = AgentVersionRow {
+            agent_id: agent_id.to_string(),
+            version: version.map(str::to_string),
+            previous_version,
+            changed,
+            evidence: evidence.to_string(),
+            detected_at: now(),
+        };
+        self.conn.execute(
+            "INSERT INTO agent_versions (id, agent_id, version, previous_version, changed, evidence, detected_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                crate::util::new_id(),
+                row.agent_id,
+                row.version,
+                row.previous_version,
+                if row.changed { 1 } else { 0 },
+                row.evidence,
+                row.detected_at
+            ],
+        )?;
+        Ok(row)
+    }
+
+    pub fn latest_agent_version(&self, agent_id: &str) -> Result<Option<AgentVersionRow>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT agent_id, version, previous_version, changed, evidence, detected_at
+                 FROM agent_versions WHERE agent_id = ?1 ORDER BY detected_at DESC, rowid DESC LIMIT 1",
+                params![agent_id],
+                |row| {
+                    Ok(AgentVersionRow {
+                        agent_id: row.get(0)?,
+                        version: row.get(1)?,
+                        previous_version: row.get(2)?,
+                        changed: row.get::<_, i64>(3)? != 0,
+                        evidence: row.get(4)?,
+                        detected_at: row.get(5)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    pub fn list_agent_version_changes(&self, agent_id: &str, limit: usize) -> Result<Vec<AgentVersionRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT agent_id, version, previous_version, changed, evidence, detected_at
+             FROM agent_versions WHERE agent_id = ?1 ORDER BY detected_at DESC, rowid DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![agent_id, limit as i64], |row| {
+            Ok(AgentVersionRow {
+                agent_id: row.get(0)?,
+                version: row.get(1)?,
+                previous_version: row.get(2)?,
+                changed: row.get::<_, i64>(3)? != 0,
+                evidence: row.get(4)?,
+                detected_at: row.get(5)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
     }
 }

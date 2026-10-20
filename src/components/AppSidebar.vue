@@ -23,6 +23,7 @@ const groups = [
   { key: 'overview', labelKey: 'nav.groups.overview' },
   { key: 'capabilities', labelKey: 'nav.groups.capabilities' },
   { key: 'workspace', labelKey: 'nav.groups.workspace' },
+  { key: 'validation', labelKey: 'nav.groups.validation' },
   { key: 'system', labelKey: 'nav.groups.system' },
 ] as const
 
@@ -56,7 +57,7 @@ function itemsFor(group: string) {
         >
           <Icon class="nav-icon" :name="item.icon" :size="16" />
           <span class="nav-label">{{ t(item.labelKey) }}</span>
-          <span class="nav-kbd">⌘{{ item.shortcut }}</span>
+          <span v-if="item.shortcut" class="nav-kbd">⌘{{ item.shortcut }}</span>
         </RouterLink>
       </template>
     </nav>
@@ -81,7 +82,10 @@ function itemsFor(group: string) {
       <div class="stack-sm">
         <div v-for="item in navItems" :key="item.path" class="info-row">
           <span class="info-row-label">{{ t(item.labelKey) }}</span>
-          <span class="info-row-value"><span class="kbd">⌘{{ item.shortcut }}</span></span>
+          <span class="info-row-value">
+            <span v-if="item.shortcut" class="kbd">⌘{{ item.shortcut }}</span>
+            <span v-else class="subtle">—</span>
+          </span>
         </div>
         <div class="info-row">
           <span class="info-row-label">{{ t('shortcuts.search') }}</span>

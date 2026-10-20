@@ -40,7 +40,7 @@
 
 | # | 威胁 | 攻击面 | 已实现控制 | 剩余风险 |
 |---|---|---|---|---|
-| T1 | **恶意 zip**（路径穿越、zip bomb、符号链接、超大文件） | `skills import --path *.zip` | 条目数 ≤ 4000；解压总量 ≤ 100MB；NUL 路径拒绝；symlink 条目拒绝；`..`/绝对路径（含 `//`、盘符）拒绝；规范化后必须仍在解压根内（`skill.rs:373-472`、`skill.rs:438-460`、`MAX_ARCHIVE_*` 见 `skill.rs:19-21`） | 未限制压缩比（但有 100MB 解压上限）；未做内容静态扫描；脚本文件会被复制进库 |
+| T1 | **恶意 zip**（路径穿越、zip bomb、符号链接、超大文件） | `skills import --path *.zip` | 条目数 ≤ 4000；解压总量 ≤ 100MB；NUL 路径拒绝；symlink 条目拒绝；`..`/绝对路径（含 `//`、盘符）拒绝；规范化后必须仍在解压根内（`skill.rs:373-472`、`skill.rs:438-460`、`MAX_ARCHIVE_*` 见 `skill.rs:19-21`） | 未限制压缩比（但有 100MB 解压上限）；导入后可用静态审计发现已知高危模式，但审计不是完备扫描 |
 | T2 | **符号链接逃逸** | 导入目录/库内容/部署目标 | `hash_dir` 拒绝指向技能根之外的 symlink（`util.rs:65-109`）；`copy_dir` 拒绝复制逃逸链接（`util.rs:199-234`）；`remove_path` 用 `symlink_metadata` 不跟随（`util.rs:183-197`）；部署后校验 symlink 解析在库内（`ops.rs:479-521`） | 目标 Agent 是否跟随 symlink 未逐一验证（只有 DSH 标 `Supported`）；symlink 安装本身可能把库路径暴露给 Agent |
 | T3 | **路径穿越 / 任意目标写入** | 计划注入、自定义根、MCP target | 目标必须绝对路径且有父/文件名（`ops.rs:210-222`）；自定义根必须绝对路径（`service.rs:269-276`）；MCP target 来自 adapter 的固定 spec；归档路径规范化 | `target_within_roots()` 存在但**没有调用方**（`ops.rs:870-882`）；当前只靠 adapter/root 生成路径，缺少最后一道白名单断言 |
 | T4 | **外部篡改**（用户/IDE 在预览后改了文件） | Skill/MCP 目标 | 计划记录 `current_hash`/`entry_hash`；preflight 拒绝 Create/Replace/Remove 与预期不符的目标；回滚拒绝覆盖操作后被修改的目标（`ops.rs:200-292`、`ops.rs:697-710`） | MCP 已改为按条目 hash 比较（`ops.rs:220-260`）；本次测试以非 force 通过 |
@@ -50,6 +50,9 @@
 | T8 | **UI 注入（XSS/危险链接）** | 技能详情、MCP 原始 JSON、路径 | SKILL.md 用自定义块解析 + 文本插值，**不使用 `v-html`**（`src/lib/markdown.ts`）；Tauri CSP `script-src 'self'`、`style-src 'unsafe-inline'`（`tauri.conf.json`）；外部链接通过 `opener` 打开固定官方 URL | 页面已落地但未做运行时注入验证；`style-src 'unsafe-inline'` 是 Tailwind/内联样式需要；未来若渲染 HTML 或用户 URL 需重新评估 |
 | T9 | **恶意/损坏配置** | Skill frontmatter、MCP JSON/TOML、Agent 配置 | YAML 解析失败 → 该技能 invalid，不中断其他扫描；JSON/TOML 解析失败 → **拒绝覆盖**（`mcp.rs:213-216`、`mcp.rs:236-241`）；SKILL.md ≤1MB；正文 >100KB 给 warning | 解析器本身（serde_yaml/serde_json/toml_edit）的漏洞属于依赖风险；未做 fuzz |
 | T10 | **误写真实 Agent 目录** | 首次使用、测试 | 默认 UI 预览 + 确认；CLI 默认只打印计划（`--yes` 才执行）；测试应使用 `AGENTHUB_HOME`/`--home` | `--home` 不隐藏 `/Applications`，真实 app 仍会被检测；验证不充分时仍可能向 `~/.claude/skills` 等未验证根写入（Claude/Cursor 为 `VerificationRequired` 但允许安装） |
+| T11 | **静态审计漏报/误报** | 第三方 skill 的脚本/提示词 | 确定性规则覆盖 spec/脚本高危/凭据/网络/权限/引用/依赖；finding 可解释、有 severity/category/path/suggestion；不执行脚本、不联网、无 AI 评分 | 规则是启发式，混淆/动态生成/二进制 payload 可能漏报；也可能误报；**不能当作完备安全证明** |
+| T12 | **人工证据被夸大/伪造** | `validations_record` 的 notes/evidence | 证据绑定 capability version + agent；只有 manual passed 可贡献 verified；UI 明确「人工证据，不是自动通过」；操作写 JSONL 审计 | notes/evidence 是用户输入，AgentHub 不做真实性/防伪证明；不能用于对外安全认证 |
+| T13 | **Agent 版本探测错误/缺失** | `.app`/CLI `--version` | `plutil`→XML→`mdls` 兜底；CLI 2s 超时；失败返回 None 不猜测；首次 baseline 不算变更 | 非标准 bundle/CLI、权限或格式差异可能无版本；版本变化只提示重新扫描/验证，不自动阻断 |
 
 ---
 
@@ -86,7 +89,20 @@
 | 失败补偿 | 逆序 undo 已成功项（`ops.rs:135-166`） |
 | 回滚保护 | 只允许 success/partial；同一操作只能回滚一次；目标被外部修改则拒绝覆盖（`ops.rs:666-679`、`ops.rs:717-760`） |
 
-### 3.4 MCP 配置安全
+### 3.4 验证平台安全边界（Validation Platform）
+
+| 控制 | 实现 | 说明 |
+|---|---|---|
+| 不执行 skill 脚本 | `audit.rs`/`deps.rs` 只读文本/目录 | 只有白名单 runtime 探测会执行 `--version`（2s 超时） |
+| 不联网 | 验证层无网络客户端 | 远程域名只做静态字符串识别 |
+| 确定性 | 规则 + 固定排序 | 无 AI 评分、无随机；finding 可复现 |
+| 有界扫描 | 单文件 4MB、超大 5MB、文件 300、引用 20、每规则 20 | 防止病态目录拖垮 UI/内存 |
+| symlink 不跟随 | `read_text_limited`/审计只按 symlink 元数据处理 | 逃逸链接报 `security.symlink_escape` |
+| 凭据值脱敏 | `scan_secrets` 只记录类型/行号；含凭据行 snippet 替换为 `[line contains a credential; value redacted]` | finding/operations/logs 均不应出现原值（有回归测试） |
+| 人工证据语义 | `validation_runs` 绑定版本+Agent；`derive_health` 安全优先 | 不自动把人工 passed 当安全通过；audit fail/deps needs_attention 仍覆盖 |
+| 审计日志 | `capability.audit` / `capability.validation` JSONL 只记 id/version/status/case | notes/evidence 不写入 operations/logs |
+
+### 3.5 MCP 配置安全
 
 - **格式损坏拒绝覆盖**：写入前解析失败 → 报错，不写（`mcp.rs:213-216`、`mcp.rs:236-241`）。
 - **只改目标条目**：读全量 → 替换/删除该 key → 写回；未知键保留；TOML 保留注释与其他表（`mcp.rs:203-300`）。
@@ -173,13 +189,15 @@ MCP env 值：
 
 | # | 风险 | 说明 |
 |---|---|---|
-| R9 | 第三方 skill 无静态审查 | 不扫描脚本/`allowed-tools`/动态注入；分发即把内容交给 Agent。UI 预览应至少展示文件清单与脚本 |
+| R9 | 静态审计是启发式 | 规则覆盖已知模式，但不是完备安全证明；混淆/动态生成/二进制 payload 可能漏报；UI 应展示 finding 与「非保证」说明 |
 | R10 | 未签名 Git 仓库 | 只做浅克隆，不校验 commit 签名/来源可信度 |
 | R11 | 导入大小上限 | zip 100MB / 4000 条目；单个 SKILL.md 1MB；无单文件上限（总解压上限覆盖） |
 | R12 | 并发锁缺口 | import/设置/MCP 定义写入没有跨进程锁；GUI+CLI 同时操作可能竞争 |
 | R13 | GUI 已人工运行验收 | 隔离 home 下 Dashboard/onboarding 正常（见 ACCEPTANCE-REPORT）；仍无自动化注入/XSS 测试 |
 | R14 | 依赖供应链 | rusqlite/toml_edit/serde 等为常规依赖；无 `cargo audit` 记录（本次未执行） |
-| R15 | 签名/公证 | DMG 已产出；未签名/未公证；分发给他人前需完成 Developer ID + notarization |
+| R16 | 验证证据不可防伪 | `notes/evidence` 为用户输入；只能作为人工证据，不能作为安全认证；后续可加 hash/附件 |
+| R17 | Agent 版本探测依赖 bundle/CLI | 非标准打包/输出格式可能导致未知；不猜测，不自动阻断 |
+| R15 | 签名/公证 | 0.2.0 `.app`/`.dmg` 已产出并安装；未签名/未公证；分发给他人前需完成 Developer ID + notarization |
 
 ### 6.3 用户确认点（产品必须保留）
 
@@ -199,7 +217,9 @@ MCP env 值：
 - `import`：capabilityId / slug / version / hash；
 - `operation.start`：operationId / kind / items / force；
 - `operation.finish`：operationId / status / items；
-- `operation.failed`：operationId / error。
+- `operation.failed`：operationId / error；
+- `capability.audit`：capabilityId / version / kind / status / risk；
+- `capability.validation`：capabilityId / version / agentId / status / case。
 
 实现：`ops.rs:24-44`；调用点 `ops.rs:117`、`ops.rs:198`、`ops.rs:235`、`service.rs:853`。
 
@@ -211,9 +231,9 @@ MCP env 值：
 
 ## 6.5 状态标记（已验证 / 未验证 / 已知限制）
 
-- **已验证**：zip 边界（含绝对路径拒绝）、symlink 逃逸拒绝、原子写、快照/回滚、外部修改检测、Keychain 存储与缺失 blocked、损坏配置拒绝覆盖、MCP env 计划脱敏、JSONL 审计；本次测试、真实 Mac 验收与 GUI 验收覆盖。
-- **未验证**：真实 Keychain 正向写入（验收避免污染）、真实 MCP 配置写入、GUI 自动化注入测试、并发/中断/磁盘满、非 macOS、签名/公证（DMG 已产出）。
-- **已知限制**：headers 明文、secret argv、快照/备份含凭据、应用未沙箱/未签名、备份恢复未实现、签名/公证未验证（DMG 已产出）；见 §6/§7。
+- **已验证**：zip 边界、symlink 逃逸拒绝、原子写、快照/回滚、外部修改检测、Keychain 存储与缺失 blocked、损坏配置拒绝覆盖、MCP env 计划脱敏、JSONL 审计；**静态审计不执行脚本/不联网/凭据脱敏**；**人工证据语义与健康状态机**（安全优先、旧版本失效）；core 76/CLI 16/前端 29 测试、真实 Mac validator 验收。
+- **未验证**：真实 Keychain 正向写入、真实 MCP 配置写入、GUI 自动化注入测试、并发/中断/磁盘满、非 macOS、签名/公证（DMG 已产出）；静态审计未做 fuzz/对抗样本全量评估。
+- **已知限制**：headers 明文、secret argv、快照/备份含凭据、应用未沙箱/未签名、备份恢复未实现、签名/公证未验证；静态审计是启发式、人工证据为用户输入；见 §6/§7。
 
 ## 7. 安全验收清单
 
@@ -227,7 +247,12 @@ MCP env 值：
 - [ ] Keychain 拒绝授权 → 错误可读、不泄露值、不写坏配置。
 - [x] UI：隔离 home 下 onboarding/Dashboard 正常（截图见 [ACCEPTANCE-REPORT.md](ACCEPTANCE-REPORT.md)）；XSS 自动化测试仍未覆盖。
 - [x] 真实 Mac：导入 → 分发 → 扫描 inSync → 更新 → 回滚 → 卸载 → 备份/doctor 全流程通过（副本见 `scripts/real-acceptance.sh`）。
-- [x] DMG 已产出（`AgentHub_0.1.0_aarch64.dmg`，3.77 MiB）；[ ] 签名/公证待完成。
+- [x] 0.2.0 DMG 已产出（`AgentHub_0.2.0_aarch64.dmg`，3.95 MiB）并覆盖安装 `/Applications`；[ ] 签名/公证待完成。
+- [x] 静态审计：含 `curl|sh`/`sudo`/`rm -rf /`/`eval`/硬编码密钥的 fixture → fail，且操作/日志/数据库不出现密钥原值（回归测试）。
+- [x] 健康状态机：安装未验证 → unverified；audit fail + manual passed → needs_attention；当前版本全部 Agent manual passed → verified；旧版本失败不影响当前版本（11 个单测）。
+- [x] DB v2：真实 `~/.agenthub` v1→v2 迁移成功，五张新表存在（真实 Mac 验证）。
+- [x] Agent 版本：真实 Mac 读出 6 个 Agent 版本；首次 baseline；同秒 rowid 排序回归测试。
+- [ ] GUI 静态审计/验证证据页面的人工注入测试（页面已运行验收，XSS 自动化未覆盖）。
 - [ ] 无网络：断网时除 Git 导入外全部功能可用。
 
 ---
@@ -235,6 +260,7 @@ MCP env 值：
 ## 8. 交叉链接
 
 - 威胁对应的写入实现：[ARCHITECTURE.md §3](ARCHITECTURE.md)
+- 验证平台安全边界：[VALIDATION.md](VALIDATION.md)
 - 适配器能力与未验证项：[ADAPTER-SPEC.md](ADAPTER-SPEC.md)
 - 数据落库位置与敏感字段：[DATA-MODEL.md §7](DATA-MODEL.md)
 - 测试隔离与安全场景：[TEST-PLAN.md](TEST-PLAN.md)

@@ -1,8 +1,8 @@
-# AgentHub
+# AgentHub · Capability Control Center
 
-> 本机多 Agent 能力管理中心：把散落在 Codex、TRAE、ZCode、WorkBuddy、DeepSeek Harness 等 Agent 目录里的 **Skills / MCP / 插件清单** 集中登记，通过适配器与事务化写入分发到指定 Agent，出错可回滚。
+> **本机 Agent 能力控制中心**：集中登记散落在 Codex、TRAE、ZCode、WorkBuddy、DeepSeek Harness 等 Agent 目录里的 **Skills / MCP / 插件清单**，通过适配器事务化分发，并用 **静态审计 + 依赖诊断 + 更新影响 + 人工验证证据 + Agent 版本健康** 回答「装没装、能不能用、安不安全、更新后会不会坏」。
 >
-> 状态快照：**2026-10-20 16:00（Asia/Shanghai）**。核心库、CLI、Tauri 命令层与 GUI 均已落地；**真实 Mac 验收已通过**（真实 `~/.agenthub` + `~/.codex` + `~/.zcode`），**GUI 已在隔离 home 运行验收**，`AgentHub.app` 已构建并安装到 `/Applications`；core 21 + CLI 9 共 **30 个 Rust 测试**、前端 21 个测试全部通过，`pnpm build` 通过。本机完整构建已产出 `AgentHub.app` 与 `AgentHub_0.1.0_aarch64.dmg`（3.77 MiB，15:59）并覆盖安装到 `/Applications`；首次 DMG 尝试因沙箱 hdiutil 权限失败，随后在用户授权的完整权限下成功。详见 [docs/ACCEPTANCE-REPORT.md](docs/ACCEPTANCE-REPORT.md)、[已知限制](#已知限制)。
+> 状态快照：**2026-10-20 16:24（Asia/Shanghai）**。**第二轮 Capability Validation Platform 已落地**：DB v2、Capability Validator（静态审计/依赖/影响/人工证据）、Agent Health Monitor、CLI/UI 新命令与页面；**真实 Mac validator 验收通过**（真实 `~/.agenthub` v1→v2 迁移、真实 Agent 版本、真实审计/依赖/影响/证据）。测试：core **76**（44 unit + 32 integration）+ CLI **16** = **92 个 Rust 测试**，前端 **7 files / 29 tests**，全部通过；`pnpm build` 与完整 `pnpm tauri build` 通过；**0.2.0 `.app` 与 `.dmg` 已构建**（16:33–16:34），`/Applications/AgentHub.app` 已覆盖安装 0.2.0；签名/公证未做。详见 [docs/VALIDATION.md](docs/VALIDATION.md)、[docs/ACCEPTANCE-REPORT.md](docs/ACCEPTANCE-REPORT.md)、[已知限制](#已知限制)。
 
 AgentHub 是 **本地优先** 的 macOS 桌面应用（Tauri 2 + Vue 3 + Rust + SQLite），无账号、无云端、无遥测。GUI 与 CLI 共用同一个 `agenthub-core` 引擎。
 
@@ -13,6 +13,7 @@ AgentHub 是 **本地优先** 的 macOS 桌面应用（Tauri 2 + Vue 3 + Rust + 
 - [状态标记](#状态标记)
 - [真实验收状态](#真实验收状态)
 - [核心原则](#核心原则)
+- [Capability Validation Platform](#capability-validation-platform)
 - [功能状态](#功能状态)
 - [环境要求](#环境要求)
 - [开发运行](#开发运行)
@@ -29,15 +30,17 @@ AgentHub 是 **本地优先** 的 macOS 桌面应用（Tauri 2 + Vue 3 + Rust + 
 
 ## 状态标记
 
-- **已验证**：真实 Mac 验收（真实库导入 → Codex/ZCode copy 分发 → 扫描 inSync → v2 更新 → 回滚精确 v1 → 卸载 → backup/doctor）；隔离 home GUI 运行验收；core 21 + CLI 9 = 30 个 Rust 测试、前端 21 个测试、`pnpm build`、`pnpm tauri build --bundles app` 均通过。
-- **未验证**：签名/公证（DMG 已产出，但未签名/未公证）、GUI 自动化回归、真实 Keychain 正向写入、真实 MCP 配置写入、并发/中断/磁盘满、非 macOS、部分 adapter 路径（Codex 项目级、Trae CN 项目根、ZCode 远程传输、WorkBuddy `staticHeaders`）。
-- **已知限制**：见下节；headers 明文、secret argv、快照/备份含 token、备份恢复未实现；安全边界见 [docs/SECURITY.md](docs/SECURITY.md)。
+- **已验证**：真实 Mac 安装/分发/更新/回滚验收；GUI 隔离 home 运行验收；**真实 Mac validator 验收**（DB v1→v2、真实 Agent 版本、真实 audit/deps/impact/validate）；core 76 + CLI 16 = 92 个 Rust 测试、前端 29 个测试、`pnpm build`、完整 `pnpm tauri build` 全部通过。
+- **未验证**：签名/公证（DMG 已产出）、GUI 自动化回归、真实 Keychain 正向写入、真实 MCP 配置写入、并发/中断/磁盘满、非 macOS、部分 adapter 路径（Codex 项目级、Trae CN 项目根、ZCode 远程传输、WorkBuddy `staticHeaders`）。
+- **已知限制**：见下节；headers 明文、secret argv、快照/备份含 token、备份恢复未实现；静态审计是规则引擎不是完备安全证明，人工证据是用户输入；详见 [docs/SECURITY.md](docs/SECURITY.md)、[docs/VALIDATION.md](docs/VALIDATION.md)。
 
 ## 真实验收状态
 
 **首版验收场景已在真实 Mac 通过（2026-10-20，用户批准）**：唯一 slug `agenthub-accept-155547` 导入真实 `~/.agenthub`，copy 分发到真实 `~/.codex/skills` 与 `~/.zcode/skills`（新建、无覆盖），扫描 `inSync=true`；导入 v2 后 `skills sync --dry-run` 检测到 `updates=1/plans=1`（仅有更新时**退出码 0**），`skills sync --yes` 更新，`skills rollback last` 精确恢复 v1 字节，`skills uninstall <ids> --yes` 删除部署且中央库保留 2 个版本，backup/doctor 通过；目标目录最终已删除。
 
-**GUI 运行验收**：release `AgentHub.app` 在隔离 home（`/tmp/agenthub-gui/home`）下打开，Dashboard 显示真实数据（Agent 6/9、技能 1、安装 2、MCP 1、插件 1、待更新 1、扫描 7 技能/重复 1/冲突 0/无效 0），onboarding 5 步第 1 步正常，中文界面正常。截图见 [docs/evidence/gui-dashboard.png](docs/evidence/gui-dashboard.png)、[docs/evidence/gui-onboarding.png](docs/evidence/gui-onboarding.png)。
+**GUI 运行验收**：release `AgentHub.app` 在隔离 home（`/tmp/agenthub-gui/home`）下打开，Dashboard 显示真实数据（Agent 6/9、技能 1、安装 2、MCP 1、插件 1、待更新 1、扫描 7 技能/重复 1/冲突 0/无效 0），onboarding 5 步第 1 步正常，中文界面正常。截图见 [docs/evidence/gui-dashboard.png](docs/evidence/gui-dashboard.png)、[docs/evidence/gui-onboarding.png](docs/evidence/gui-onboarding.png)、[docs/evidence/gui-health.png](docs/evidence/gui-health.png)。
+
+**Validator 真实验收（2026-10-20 16:19，用户批准）**：真实 `~/.agenthub` 自动从 v1 迁移到 **DB v2**；`health` total=2/not_deployed=2；`health --agents --record` 检测到 ChatGPT 26.1013.40934、Codex 26.623.70822、DSH 0.2.1-rc.2、TRAE CN 3.4.4、WorkBuddy 5.8.3、ZCode 3.16.2；`skills audit memory-maker` = warn/medium、8 findings；`skills deps memory-maker` = healthy（node 24.19.0、MCP unknown）；`skills impact memory-maker` = medium/skill_md_changed/requiresRevalidation=true；`skills validate memory-maker --agent codex --status passed` 写入成功。证据 `/tmp/agenthub-validator-real/`，方法论见 [docs/VALIDATION.md](docs/VALIDATION.md)。
 
 **打开已安装的 AgentHub**
 
@@ -52,7 +55,7 @@ AGENTHUB_HOME=/tmp/agenthub-gui/home \
   /Applications/AgentHub.app/Contents/MacOS/agenthub
 ```
 
-> 构建：完整 `pnpm tauri build` 已通过，产物 `target/release/bundle/macos/AgentHub.app`（7.14 MiB）与 `target/release/bundle/dmg/AgentHub_0.1.0_aarch64.dmg`（3.77 MiB，2026-10-20 15:59）；`/Applications/AgentHub.app` 已用该构建覆盖安装。首次 DMG 尝试因沙箱 hdiutil 权限失败，随后在用户授权的完整权限下成功；签名/公证尚未配置。完整报告：[docs/ACCEPTANCE-REPORT.md](docs/ACCEPTANCE-REPORT.md)。
+> 构建：完整 `pnpm tauri build` 已于 2026-10-20 16:33–16:34 成功产出 **0.2.0** `target/release/bundle/macos/AgentHub.app`（7.49 MiB）与 `target/release/bundle/dmg/AgentHub_0.2.0_aarch64.dmg`（3.95 MiB）；`/Applications/AgentHub.app` 已删除旧 0.1.0 并用 0.2.0 覆盖安装。首次 DMG 尝试因沙箱 hdiutil 权限失败，随后在用户授权的完整权限下成功；签名/公证尚未配置。完整报告：[docs/ACCEPTANCE-REPORT.md](docs/ACCEPTANCE-REPORT.md)。
 
 ## 核心原则
 
@@ -65,6 +68,7 @@ AGENTHUB_HOME=/tmp/agenthub-gui/home \
 | 5 | **Capability-based** | 适配器显式声明 symlink/插件/传输能力；未验证项标 `Unverified` / `VerificationRequired` |
 | 6 | **Transactional** | 计划 → 预检 → 快照 → 写入 → 校验；失败逆序补偿；支持操作级回滚 |
 | 7 | **No Fake Integration** | 没有真实验证的能力不展示、不写入；ChatGPT 只读、DSH MCP 不声明 |
+| 8 | **Verified, not assumed** | 安装 ≠ 可用 ≠ 已验证；只有审计/环境/人工证据支持的当前版本才显示 `verified` |
 
 完整定义见 [docs/PRD.md](docs/PRD.md)。
 
@@ -86,8 +90,8 @@ AGENTHUB_HOME=/tmp/agenthub-gui/home \
 | 更新检测 / 漂移 / 缺失检测 | ✅ | Dashboard 与 `check_changes` |
 | 操作级回滚 | ✅ | 每个操作最多一次；拒绝覆盖外部修改 |
 | CLI | ✅ | 计划门禁、`--json`、退出码 0/1/2 |
-| 集成测试 | ✅ | core 21/21、CLI 9/9、前端 21/21 通过（2026-10-20 15:56 实测）；Rust 自动化测试共 30 |
-| GUI | ✅ | 10 条路由 + 11 个视图 + 17 组件；`pnpm build` 通过；隔离 home 人工运行验收 |
+| 测试 | ✅ | core 76、CLI 16（Rust 合计 92）、前端 29 通过（2026-10-20 16:24 实测） |
+| GUI | ✅ | 11 条导航路由 + 12 视图 + 20 组件；`pnpm build` 通过；隔离 home 人工运行验收 |
 | 真实 Mac 验收 | ✅ | 导入/分发/扫描/更新/回滚/卸载/备份/doctor；见 ACCEPTANCE-REPORT |
 
 ### Phase 2 — MCP（✅ 核心完成；headers 待加固）
@@ -115,9 +119,24 @@ AGENTHUB_HOME=/tmp/agenthub-gui/home \
 | 启动自动扫描 | 🟡 | UI 会按设置调用 scan；核心 `open()` 本身不扫描 |
 | 结构化日志 | ✅ | `logs/operations.log` JSONL（import/start/finish/failed） |
 | 备份恢复 | ⛔ | 备份只能创建/列出；无恢复路径 |
-| GUI 运行验收 | ✅ | Dashboard/onboarding/中文界面/活动历史；截图见 docs/evidence |
+| GUI 运行验收 | ✅ | Dashboard/健康摘要/onboarding/中文界面/活动历史；截图见 docs/evidence |
 
-> 详细页面规格见 [docs/UI-SPEC.md](docs/UI-SPEC.md)，阶段路线见 [docs/ROADMAP.md](docs/ROADMAP.md)。
+### Phase 4 — Capability Validation Platform（✅ 本轮落地，持续演进）
+
+| 能力 | 状态 | 说明 |
+|---|---|---|
+| Capability Validator（静态审计） | ✅ | `audit.rs`：确定性规则、finding/severity/category/path/suggestion；不执行脚本、不联网、无 AI 评分 |
+| 依赖与环境诊断 | ✅ | `deps.rs`：shebang runtime 真实探测（2s 超时）、requirements/pyproject/package.json 解析；MCP/凭据 unknown |
+| 更新影响分析 | ✅ | `impact.rs`：版本 diff（500 条上限+真实总数）、classes、风险、`requiresRevalidation`；写入 `update_impacts` 并进入分发计划 warnings |
+| 人工验证证据 | ✅ | `validation_runs`：agent/case/status/notes/evidence；明确「封闭 Agent 无法自动 E2E，这是人工证据不是自动通过」 |
+| 健康状态机 | ✅ | NotDeployed / Failed / NeedsAttention / Verified / Unverified；安装≠验证；安全优先；只有当前版本全部安装 Agent manual passed 才 Verified |
+| Agent Health Monitor | ✅ | `agent_health.rs`：`.app` CFBundleShortVersionString（plutil→XML→mdls）+ CLI `--version`；首次 baseline，变化提示重扫/重验；同秒 rowid 决胜 |
+| DB v2 | ✅ | 新增 capability_audits / dependency_reports / update_impacts / validation_runs / agent_versions；v1 自动升级、幂等 |
+| CLI / UI | ✅ | `health`、`skills audit|deps|impact|validate`；`/health` 页、SkillDetail 四区块、Agents 版本健康、Dashboard/Skills 健康列、分发预览影响摘要 |
+
+**推荐工作流**：导入 → **静态审计** → **依赖/环境检查** → 分发（预览含更新影响）→ **人工/环境验证并记录证据** → 更新（查看影响、重新验证）→ 回滚。安装/同步仍复用原有事务引擎，验证平台不重复实现。
+
+> 详细页面规格见 [docs/UI-SPEC.md](docs/UI-SPEC.md)，验证方法论见 [docs/VALIDATION.md](docs/VALIDATION.md)，阶段路线见 [docs/ROADMAP.md](docs/ROADMAP.md)。
 
 ---
 
@@ -191,7 +210,7 @@ source scripts/cargo-env.sh
 pnpm tauri build
 ```
 
-> **当前快照的构建状态**：`pnpm build` 已通过（`vue-tsc --noEmit` + Vite，dist 生成）；完整 `pnpm tauri build` 已通过并产出 `AgentHub.app`（7.14 MiB）与 `AgentHub_0.1.0_aarch64.dmg`（3.77 MiB，15:59），`/Applications/AgentHub.app` 已覆盖安装；首次 DMG 尝试因沙箱 hdiutil 权限失败，完整权限重跑成功。签名/公证未做。
+> **当前快照的构建状态**：`pnpm build` 已通过（`vue-tsc --noEmit` + Vite，dist 生成）；完整 `pnpm tauri build` 已通过并产出 0.2.0 `AgentHub.app`（7.49 MiB）与 `AgentHub_0.2.0_aarch64.dmg`（3.95 MiB，2026-10-20 16:33–16:34），`/Applications/AgentHub.app` 已覆盖安装 0.2.0；首次 DMG 尝试因沙箱 hdiutil 权限失败，完整权限重跑成功。签名/公证未做。
 
 ### 5. 只构建 CLI
 
@@ -250,6 +269,16 @@ $BIN profiles list
 $BIN backup create
 $BIN backups list
 
+# 健康与验证（第二轮新增）
+$BIN health                         # 能力健康概览（verified/unverified/needs_attention/failed/not_deployed）
+$BIN health --agents                # Agent 版本健康（只读）
+$BIN health --agents --record       # 记录一次版本观测（首次为 baseline）
+$BIN skills audit <skill>           # 静态安全审计；status=fail → 退出码 2
+$BIN skills deps <skill>            # 依赖/环境诊断；needs_attention → 退出码 2
+$BIN skills impact <skill> --to <version-id>   # 更新影响（默认 to=当前版本）
+$BIN skills validate <skill> --agent codex --case "generate invoice PDF" --status passed \
+  --notes "Codex 26.x" --evidence "log excerpt or link"
+
 # MCP：列出、发现、分发（CLI 没有「创建 MCP 定义」命令；env 值不会进入 plan）
 $BIN mcp list
 $BIN mcp discover --agent codex
@@ -275,8 +304,9 @@ $BIN --home "$AGENTHUB_HOME" doctor
 
 ```text
 ~/.agenthub/
-├── agenthub.db                  # SQLite：agents/capabilities/versions/installations/
-│                                #   mcp_definitions/operations/snapshots/scan_results/...
+├── agenthub.db                  # SQLite（user_version=2）：v1 全部表 +
+│                                #   capability_audits/dependency_reports/update_impacts/
+│                                #   validation_runs/agent_versions
 ├── library/
 │   └── skills/<slug>/<hash12>/  # 不可变技能版本（SKILL.md + 资源）
 ├── snapshots/<operation-id>/    # 每次写入前的目标备份（目录/文件）
@@ -308,6 +338,8 @@ $BIN --home "$AGENTHUB_HOME" doctor
 - **快照与回滚**：每次写入前快照；失败自动逆序恢复；操作级回滚需显式确认。
 - **不可信输入**：zip 拒绝路径穿越/绝对路径/symlink 条目/超限；Git 只浅克隆、不执行仓库脚本、删除 `.git`；Markdown 渲染不使用 `v-html`。
 - **凭据**：MCP env 值存 Keychain，数据库只存 key 名；**分发计划 payload 已剥离 env 值**，执行时才从 Keychain 重建；`logs/operations.log` 只记 id/路径/hash，不记 secret。
+- **静态审计**：只读、不执行脚本、不联网、无 AI 评分；硬编码凭据只输出类型/行号，**不输出原值**；规则是启发式，不等同完备安全证明。
+- **人工验证证据**：`validation_runs` 的 notes/evidence 是用户输入，AgentHub 不做真实性证明；UI 明确提示「这是人工证据，不是自动通过」。
 - **已知风险（必须在 UI/使用中留意）**：
   1. MCP headers 当前**明文**入库并写入 Agent 配置；
   2. `/usr/bin/security ... -w <value>` 会让 secret 短暂出现在进程参数；
@@ -325,10 +357,11 @@ $BIN --home "$AGENTHUB_HOME" doctor
 | 类别 | 限制 |
 |---|---|
 | GUI | 已人工运行验收；无 Tauri 自动化回归；浏览器环境只能显示「请运行 pnpm tauri dev」 |
-| 打包/签名 | DMG 已产出（`AgentHub_0.1.0_aarch64.dmg`）；未签名/未公证 |
+| 打包/签名 | 0.2.0 DMG 已产出（`AgentHub_0.2.0_aarch64.dmg`）；未签名/未公证 |
 | 测试 | 无 `src-tauri` 自动化测试；核心缺纯函数单元测试 |
 | MCP | DSH Cordis YAML、TRAE 全局、ZCode 原生项目配置未实现；删除后留空表/空对象；headers 明文 |
 | 能力范围 | 插件只读；不执行 skill 脚本；不试连 MCP；不提供市场/云同步/调用统计 |
+| 验证平台 | 静态规则非完备安全证明（可能漏报/误报）；MCP/凭据静态 unknown；封闭 Agent 只能人工证据；版本探测依赖 app bundle/CLI 输出；证据为用户输入 |
 | 记录 | 扫描不写 `operations`（导入已写）；无通用 tracing 日志；备份无恢复路径 |
 | Scope | `installations.scope` 记录 global/custom；项目级安装仍按 custom root 处理 |
 | Adapter | Codex 项目级根、Trae CN 项目根、ZCode 远程传输、WorkBuddy `staticHeaders` 等仍未验证；ChatGPT 只读；同名 app 未按 `CFBundleName` 区分 |
@@ -370,7 +403,7 @@ $BIN --home "$AGENTHUB_HOME" doctor
 
 ### DMG 打包（已成功；首次沙箱尝试失败）
 
-- 本机完整构建已产出 `target/release/bundle/dmg/AgentHub_0.1.0_aarch64.dmg`（3.77 MiB，2026-10-20 15:59）与 `target/release/bundle/macos/AgentHub.app`（7.14 MiB），并已覆盖安装 `/Applications/AgentHub.app`。
+- 本机完整构建已产出 **0.2.0** `target/release/bundle/dmg/AgentHub_0.2.0_aarch64.dmg`（3.95 MiB，2026-10-20 16:34）与 `target/release/bundle/macos/AgentHub.app`（7.49 MiB，16:33），并已覆盖安装 `/Applications/AgentHub.app`（0.2.0）。
 - 首次 DMG 尝试在受限沙箱内因 hdiutil 权限失败（当时目录中只有 `bundle_dmg.sh`）；随后在用户授权的完整权限下重跑成功。若在受限环境复现失败，请在普通桌面会话/有权限终端重跑 `source scripts/cargo-env.sh && pnpm tauri build`，这不是应用代码错误。
 - 尚未做 Developer ID 签名与 notarization。
 
@@ -390,7 +423,7 @@ open /Applications/AgentHub.app
 
 ### `pnpm test` 的 jsdom 警告
 
-- 输出中的 `Not implemented: Window's scrollTo()` 来自 jsdom 环境，不影响测试结果（5 个文件 / 21 个测试通过）。
+- 输出中的 `Not implemented: Window's scrollTo()` 来自 jsdom 环境，不影响测试结果（7 个文件 / 29 个测试通过）。
 
 ### 空白窗口 / 找不到 Tauri 后端
 
@@ -414,13 +447,13 @@ crates/agenthub-core/          # 核心引擎（无 Tauri 依赖）
     service.rs                 # AgentHub 门面（GUI/CLI 共用）
     skill.rs                   # SKILL.md 解析/导入安全
     util.rs                    # hash/原子写/路径安全
-  tests/                       # 21 个集成测试
+  tests/                       # 32 个集成测试（含 validator 11）
 crates/agenthub-cli/           # CLI（1324 行薄前端）
   tests/cli.rs                 # 9 个进程级测试
-src-tauri/                     # Tauri 2 命令层（38 个命令）
-src/                           # Vue 3 UI（App/router/11 views/17 components）
-docs/                          # PRD/架构/数据/适配器/安全/UI/测试/路线图/变更/验收报告
-docs/evidence/                 # GUI 验收截图（缩略图）
+src-tauri/                     # Tauri 2 命令层（47 个命令）
+src/                           # Vue 3 UI（App/router/12 views/20 components）
+docs/                          # PRD/架构/数据/适配器/安全/UI/测试/路线图/变更/验收报告/验证方法论
+docs/evidence/                 # GUI 验收截图（Dashboard/Onboarding/Health）
 scripts/cargo.sh|cargo-env.sh  # 固定 rustup stable + /tmp CARGO_HOME
 scripts/real-acceptance.sh     # 真实 Mac 验收脚本（需授权）
 ```
@@ -438,10 +471,11 @@ scripts/real-acceptance.sh     # 真实 Mac 验收脚本（需授权）
 | [docs/SECURITY.md](docs/SECURITY.md) | 威胁模型、已实现控制、剩余风险、确认点 | ✅ 本次 |
 | [docs/UI-SPEC.md](docs/UI-SPEC.md) | 9+1 页面、任务流、状态/token、预览确认、实现状态 | ✅ 本次 |
 | [docs/TEST-PLAN.md](docs/TEST-PLAN.md) | 测试分层、隔离要求、场景矩阵、真实结果、人工验收 | ✅ 本次 |
-| [docs/ROADMAP.md](docs/ROADMAP.md) | Phase 0–4、验收标准、未来候选、风险登记 | ✅ 本次 |
-| [docs/CHANGELOG.md](docs/CHANGELOG.md) | 0.1.0 Added/Changed/Fixed/Known issues | ✅ 本次 |
+| [docs/ROADMAP.md](docs/ROADMAP.md) | Phase 0–5、Validation Platform、未来候选、风险登记 | ✅ 本次 |
+| [docs/CHANGELOG.md](docs/CHANGELOG.md) | 0.1.0 / 0.2.0 Added/Changed/Fixed/Known issues | ✅ 本次 |
+| [docs/VALIDATION.md](docs/VALIDATION.md) | 验证方法论、规则表、证据语义、健康状态机、限制与路线 | ✅ 新增 |
 | [docs/ACCEPTANCE-REPORT.md](docs/ACCEPTANCE-REPORT.md) | 真实 Mac 验收 + GUI 运行 + 构建/测试证据 + 未验证项 | ✅ 新增 |
-| [docs/evidence/](docs/evidence/) | GUI 验收截图（Dashboard / Onboarding） | ✅ 新增 |
+| [docs/evidence/](docs/evidence/) | GUI 验收截图（Dashboard / Onboarding / Health） | ✅ 新增 |
 | [docs/AGENT-COMPATIBILITY.md](docs/AGENT-COMPATIBILITY.md) | 本机 9 个 Agent 路径/格式/证据矩阵 | 📚 调研同事维护 |
 | [docs/REFERENCE-STUDY.md](docs/REFERENCE-STUDY.md) | Agent Skills / MCP 规范与各 Agent 官方文档研究 | 📚 调研同事维护 |
 | [docs/compat-evidence/](docs/compat-evidence/README.md) | 脱敏证据、symlink 验证方案、交叉核对 | 📚 调研同事维护 |
@@ -451,10 +485,10 @@ scripts/real-acceptance.sh     # 真实 Mac 验收脚本（需授权）
 ## 测试与验证
 
 ```bash
-# Rust（必须用 wrapper）；core 21 + CLI 9 = 30
+# Rust（必须用 wrapper）：core 76 + CLI 16 = 92
 ./scripts/cargo.sh test -p agenthub-core -p agenthub-cli
 
-# 前端：5 文件 / 21 测试
+# 前端：7 文件 / 29 测试
 pnpm test
 
 # 构建
@@ -462,14 +496,17 @@ pnpm build
 pnpm tauri build
 ```
 
-**当前真实结果（2026-10-20 15:56）**：
+**当前真实结果（2026-10-20 16:24）**：
 
-- `./scripts/cargo.sh test -p agenthub-core -p agenthub-cli`：**exit 0**；core 21、CLI 9（共 30）全部通过。
-- `pnpm test`（vitest）：5 个文件 / 21 个测试，**全部通过**。
+- `./scripts/cargo.sh test -p agenthub-core`：**76 passed / 0 failed**（44 unit + 32 integration，含 validator 11）。
+- `./scripts/cargo.sh test -p agenthub-cli`：**16 passed / 0 failed**（9 旧 + 7 validator CLI）。
+- Rust 合计 **92 passed / 0 failed**；`./scripts/cargo.sh check -p agenthub` exit 0。
+- `pnpm test`（vitest）：**7 文件 / 29 测试全部通过**。
 - `pnpm build`：**通过**（`vue-tsc --noEmit` + Vite build）。
-- `pnpm tauri build`（完整构建）：**通过**；产物 `AgentHub.app`（7.14 MiB）与 `AgentHub_0.1.0_aarch64.dmg`（3.77 MiB，15:59）；`/Applications/AgentHub.app` 已覆盖安装。首次 DMG 尝试因沙箱 hdiutil 权限失败，完整权限重跑成功。
+- `pnpm tauri build`（完整构建）：**通过**；0.2.0 产物 `AgentHub.app`（7.49 MiB）与 `AgentHub_0.2.0_aarch64.dmg`（3.95 MiB，16:33–16:34）；`/Applications/AgentHub.app` 已覆盖安装 0.2.0。首次 DMG 尝试因沙箱 hdiutil 权限失败，完整权限重跑成功。
 - **真实 Mac 验收**：通过；`skills sync --dry-run` 仅有更新时退出码 0（drift/missing/blocked/conflict 才 2）；回滚精确恢复 v1；卸载后库保留 2 版本；doctor ok。
-- **GUI 运行验收**：隔离 home 通过；截图见 `docs/evidence/`。
+- **GUI 运行验收**：隔离 home 通过（含 Dashboard 健康摘要/健康页）；截图 `docs/evidence/gui-health.png`。
+- **真实 Mac validator 验收**：DB v1→v2、Agent 版本探测、audit/deps/impact/validate 全通过；证据 `/tmp/agenthub-validator-real/`。
 
 > 以上为真实输出摘要；完整证据与残留状态见 [docs/ACCEPTANCE-REPORT.md](docs/ACCEPTANCE-REPORT.md)。「测试通过」不包含签名/公证、GUI 自动化或真实 Keychain 正向写入（DMG 已产出）。
 

@@ -80,6 +80,8 @@ enum Commands {
         #[command(subcommand)]
         command: ProfilesCommand,
     },
+    /// Capability health overview (audits, validation evidence) or agent versions.
+    Health(HealthArgs),
     /// Create a full metadata backup.
     Backup {
         #[command(subcommand)]
@@ -114,6 +116,14 @@ enum SkillsCommand {
     Sync(SyncArgs),
     /// Roll back a successful operation (or the latest rollbackable one).
     Rollback(RollbackArgs),
+    /// Run the deterministic static security audit for a skill version.
+    Audit(AuditArgs),
+    /// Check runtimes, manifests and dependencies for a skill version.
+    Deps(AuditArgs),
+    /// Analyse the impact of updating a skill from one version to another.
+    Impact(ImpactArgs),
+    /// Record real (manual) validation evidence for a skill version.
+    Validate(ValidateArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -244,6 +254,62 @@ struct RollbackArgs {
 }
 
 #[derive(Debug, Args)]
+struct AuditArgs {
+    /// Skill id or slug.
+    skill: String,
+    /// Version id (defaults to the current library version).
+    #[arg(long)]
+    version: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct ImpactArgs {
+    /// Skill id or slug.
+    skill: String,
+    /// Installed version id to compare from (defaults to the first installation).
+    #[arg(long = "from")]
+    from_version: Option<String>,
+    /// Target version id (defaults to the current library version).
+    #[arg(long = "to")]
+    to_version: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct ValidateArgs {
+    /// Skill id or slug.
+    skill: String,
+    /// Agent key the evidence was produced with (omit for agent-neutral checks).
+    #[arg(long)]
+    agent: Option<String>,
+    /// Validation case name, e.g. "generate invoice PDF".
+    #[arg(long = "case")]
+    case_name: String,
+    /// passed | failed | needs_attention | unverified
+    #[arg(long)]
+    status: String,
+    #[arg(long)]
+    notes: Option<String>,
+    #[arg(long)]
+    evidence: Option<String>,
+    /// Version id (defaults to the current library version).
+    #[arg(long)]
+    version: Option<String>,
+    /// manual | static | environment | regression (defaults to manual).
+    #[arg(long)]
+    kind: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct HealthArgs {
+    /// Show agent versions and health instead of the capability overview.
+    #[arg(long)]
+    agents: bool,
+    /// Record the detected agent versions (implies --agents).
+    #[arg(long)]
+    record: bool,
+}
+
+#[derive(Debug, Args)]
 struct DiscoverArgs {
     /// Restrict discovery to one agent key (e.g. codex).
     #[arg(long, value_name = "KEY")]
@@ -353,6 +419,10 @@ fn run(cli: Cli) -> CliResult<u8> {
             SkillsCommand::Uninstall(args) => cmd_skills_uninstall(&ctx, args),
             SkillsCommand::Sync(args) => cmd_skills_sync(&ctx, args),
             SkillsCommand::Rollback(args) => cmd_skills_rollback(&ctx, args),
+            SkillsCommand::Audit(args) => cmd_skills_audit(&ctx, args),
+            SkillsCommand::Deps(args) => cmd_skills_deps(&ctx, args),
+            SkillsCommand::Impact(args) => cmd_skills_impact(&ctx, args),
+            SkillsCommand::Validate(args) => cmd_skills_validate(&ctx, args),
         },
         Commands::Mcp { command } => match command {
             McpCommand::List => cmd_mcp_list(&ctx),
@@ -365,6 +435,7 @@ fn run(cli: Cli) -> CliResult<u8> {
         Commands::Profiles { command } => match command {
             ProfilesCommand::List => cmd_profiles_list(&ctx),
         },
+        Commands::Health(args) => cmd_health(&ctx, args),
         Commands::Backup { command } => match command {
             BackupCommand::Create => cmd_backup_create(&ctx),
         },
@@ -966,6 +1037,217 @@ fn cmd_skills_uninstall(ctx: &Ctx, args: UninstallArgs) -> CliResult<u8> {
             Ok(result_exit_code(&result))
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// capability health / audit / dependencies / impact / validation
+// ---------------------------------------------------------------------------
+
+fn cmd_health(ctx: &Ctx, args: HealthArgs) -> CliResult<u8> {
+    if args.agents || args.record {
+        let report = ctx.hub.agent_health_report(args.record)?;
+        if ctx.json {
+            ctx.emit_value(json!({ "checkedAt": report.checked_at, "agents": report.agents }));
+        } else {
+            println!("Agent health at {}", report.checked_at);
+            for agent in &report.agents {
+                println!(
+                    "  {:<12} {:<22} version={:<14} changed={} pathsOk={}",
+                    agent.agent_key,
+                    agent.agent_name,
+                    agent.version.clone().unwrap_or_else(|| "-".to_string()),
+                    agent.version_changed,
+                    agent.paths_ok
+                );
+                for note in &agent.notes {
+                    println!("    note: {note}");
+                }
+            }
+        }
+        return Ok(EXIT_OK);
+    }
+    let overview = ctx.hub.health_overview()?;
+    if ctx.json {
+        ctx.emit_value(serde_json::to_value(&overview)?);
+    } else {
+        let summary = &overview.summary;
+        println!(
+            "Capability health: {} total | verified {} | unverified {} | needs attention {} | failed {} | not deployed {}",
+            summary.total,
+            summary.verified,
+            summary.unverified,
+            summary.needs_attention,
+            summary.failed,
+            summary.not_deployed
+        );
+        if let Some(checked_at) = &summary.last_checked_at {
+            println!("  last check: {checked_at}");
+        }
+        for capability in &overview.capabilities {
+            println!(
+                "  {:<28} {:<22} {:<16} {}",
+                capability.slug,
+                capability.version_label,
+                capability.status.as_str(),
+                capability.reasons.first().cloned().unwrap_or_default()
+            );
+        }
+    }
+    Ok(EXIT_OK)
+}
+
+fn cmd_skills_audit(ctx: &Ctx, args: AuditArgs) -> CliResult<u8> {
+    let capability_id = resolve_skill_id(&ctx.hub, &args.skill)?;
+    let audit = ctx.hub.audit_skill(AuditRequest {
+        capability_id,
+        version_id: args.version,
+        kind: Some("static".to_string()),
+    })?;
+    if ctx.json {
+        ctx.emit_value(serde_json::to_value(&audit)?);
+    } else {
+        println!(
+            "Static audit: status={} risk={} version={}",
+            audit.status, audit.risk, audit.version_label
+        );
+        println!("  {}", audit.summary);
+        for finding in &audit.findings {
+            println!(
+                "  [{}] {} ({}) {}",
+                finding.severity, finding.id, finding.category, finding.title
+            );
+            if !finding.detail.is_empty() {
+                println!("      {}", finding.detail);
+            }
+            if let Some(path) = &finding.path {
+                println!("      path: {path}");
+            }
+        }
+    }
+    Ok(if audit.status == "fail" { EXIT_PARTIAL } else { EXIT_OK })
+}
+
+fn cmd_skills_deps(ctx: &Ctx, args: AuditArgs) -> CliResult<u8> {
+    let capability_id = resolve_skill_id(&ctx.hub, &args.skill)?;
+    let report = ctx.hub.skill_dependencies(AuditRequest {
+        capability_id,
+        version_id: args.version,
+        kind: Some("environment".to_string()),
+    })?;
+    if ctx.json {
+        ctx.emit_value(serde_json::to_value(&report)?);
+    } else {
+        println!(
+            "Dependencies: status={} risk={}",
+            report.status, report.risk
+        );
+        println!("  {}", report.summary);
+        for item in &report.items {
+            println!(
+                "  {:<10} {:<20} {:<10} found={} — {}",
+                item.kind,
+                item.name,
+                item.status,
+                item.found.clone().unwrap_or_else(|| "-".to_string()),
+                item.detail
+            );
+            if let Some(suggestion) = &item.suggestion {
+                println!("      suggestion: {suggestion}");
+            }
+        }
+    }
+    Ok(if report.status == "needs_attention" {
+        EXIT_PARTIAL
+    } else {
+        EXIT_OK
+    })
+}
+
+fn cmd_skills_impact(ctx: &Ctx, args: ImpactArgs) -> CliResult<u8> {
+    let capability_id = resolve_skill_id(&ctx.hub, &args.skill)?;
+    let skills = ctx.hub.list_skills()?;
+    let skill = skills
+        .iter()
+        .find(|skill| skill.id == capability_id)
+        .ok_or_else(|| CliError("skill disappeared".to_string()))?;
+    let to_version = match args.to_version {
+        Some(version) => version,
+        None => skill.current_version_id.clone(),
+    };
+    let impact = ctx.hub.preview_update(ImpactRequest {
+        capability_id,
+        from_version_id: args.from_version,
+        to_version_id: to_version,
+    })?;
+    if ctx.json {
+        ctx.emit_value(serde_json::to_value(&impact)?);
+    } else {
+        println!(
+            "Update impact: {} -> {} (risk {})",
+            impact.from_version_label, impact.to_version_label, impact.risk
+        );
+        println!("  {}", impact.summary);
+        println!(
+            "  affected installations: {} across agents [{}]",
+            impact.affected_installation_count,
+            impact.affected_agent_keys.join(", ")
+        );
+        if !impact.affected_project_roots.is_empty() {
+            println!(
+                "  affected project roots: {}",
+                impact.affected_project_roots.join(", ")
+            );
+        }
+        println!(
+            "  classes: {}",
+            impact.classes.join(", ")
+        );
+        println!(
+            "  revalidation required: {}",
+            impact.requires_revalidation
+        );
+        for change in impact.file_changes.iter().take(40) {
+            println!(
+                "  {:<8} {:<60} {} -> {} bytes",
+                change.change, change.path, change.size_before, change.size_after
+            );
+        }
+        for finding in &impact.findings {
+            println!("  [{}] {} {}", finding.severity, finding.id, finding.title);
+        }
+    }
+    Ok(EXIT_OK)
+}
+
+fn cmd_skills_validate(ctx: &Ctx, args: ValidateArgs) -> CliResult<u8> {
+    let capability_id = resolve_skill_id(&ctx.hub, &args.skill)?;
+    let agent_id = match args.agent {
+        Some(agent) => resolve_agent_ids(&ctx.hub, &[agent])?.into_iter().next(),
+        None => None,
+    };
+    let run = ctx.hub.record_validation(ValidationRequest {
+        capability_id,
+        version_id: args.version,
+        agent_id,
+        kind: args.kind,
+        status: args.status,
+        case_name: args.case_name,
+        notes: args.notes,
+        evidence: args.evidence,
+    })?;
+    if ctx.json {
+        ctx.emit_value(serde_json::to_value(&run)?);
+    } else {
+        println!(
+            "Recorded validation: {} on {} (agent={}, version={}, case={})",
+            run.status,
+            run.agent_name.clone().unwrap_or_else(|| "agent-neutral".to_string()),
+            run.agent_key.clone().unwrap_or_else(|| "-".to_string()),
+            run.version_label,
+            run.case_name
+        );
+    }
+    Ok(EXIT_OK)
 }
 
 fn emit_plan_only(ctx: &Ctx, plan: &OperationPlan) -> CliResult<()> {

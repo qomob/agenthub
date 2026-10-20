@@ -1127,6 +1127,44 @@ impl AgentHub {
             let _ = scope;
         }
 
+        // When this is an update, surface version-to-version impact (scripts,
+        // network, dependencies, affected deployments) in the plan itself.
+        let mut warnings = warnings;
+        let from_version_id = items
+            .iter()
+            .filter_map(|item| item.previous_installation.as_ref())
+            .filter_map(|value| {
+                serde_json::from_value::<InstallationRow>(value.clone())
+                    .ok()
+                    .and_then(|row| row.version_id)
+            })
+            .find(|version_id| version_id != &version.id);
+        if let Some(from_version_id) = from_version_id {
+            match self.preview_update(ImpactRequest {
+                capability_id: capability.id.clone(),
+                from_version_id: Some(from_version_id),
+                to_version_id: version.id.clone(),
+            }) {
+                Ok(impact) => {
+                    warnings.push(format!(
+                        "Update impact: {} (risk {}, {} affected installation(s), revalidation required: {}).",
+                        impact.summary,
+                        impact.risk,
+                        impact.affected_installation_count,
+                        impact.requires_revalidation
+                    ));
+                    if impact.requires_revalidation {
+                        warnings.push(
+                            "This update changes scripts, SKILL.md, dependencies or network access. Re-record validation evidence after applying it."
+                                .to_string(),
+                        );
+                    }
+                }
+                Err(err) => warnings.push(format!(
+                    "Could not compute update impact automatically: {err}"
+                )),
+            }
+        }
         let plan = self.persist_plan(
             OperationKind::Install,
             format!("Install {} to {} agent(s)", capability.name, request.agent_ids.len()),
@@ -1906,6 +1944,582 @@ impl AgentHub {
             restarts,
             false,
         )
+    }
+
+    // -- capability health, audits, dependencies, validation ----------------
+
+    fn resolve_version(
+        &self,
+        capability_id: &str,
+        requested: Option<&str>,
+    ) -> Result<(crate::db::CapabilityRow, crate::db::VersionRow)> {
+        let capability = self
+            .db
+            .get_capability(capability_id)?
+            .ok_or_else(|| Error::not_found("skill does not exist"))?;
+        if capability.kind != "skill" {
+            return Err(Error::unsupported("only skill versions can be validated"));
+        }
+        let version_id = requested
+            .map(str::to_string)
+            .or_else(|| capability.current_version_id.clone())
+            .ok_or_else(|| Error::msg("skill has no version"))?;
+        let version = self
+            .db
+            .get_version(&version_id)?
+            .ok_or_else(|| Error::not_found("version does not exist"))?;
+        if version.capability_id != capability.id {
+            return Err(Error::msg("version does not belong to the skill"));
+        }
+        Ok((capability, version))
+    }
+
+    pub fn audit_skill(&self, request: AuditRequest) -> Result<CapabilityAudit> {
+        let (capability, version) =
+            self.resolve_version(&request.capability_id, request.version_id.as_deref())?;
+        let root = PathBuf::from(&version.storage_path);
+        if !root.is_dir() {
+            return Err(Error::not_found(format!(
+                "library copy is missing: {}",
+                root.display()
+            )));
+        }
+        let kind = request.kind.unwrap_or_else(|| "static".to_string());
+        if kind != "static" && kind != "environment" {
+            return Err(Error::msg("audit kind must be static or environment"));
+        }
+        let result = if kind == "environment" {
+            let deps = crate::deps::check_skill_dependencies(&root);
+            crate::audit::AuditResult {
+                status: deps.status,
+                risk: deps.risk,
+                summary: deps.summary,
+                findings: Vec::new(),
+            }
+        } else {
+            crate::audit::audit_skill_dir(&root)
+        };
+        let row = crate::db::AuditRow {
+            id: util::new_id(),
+            capability_id: capability.id.clone(),
+            version_id: version.id.clone(),
+            kind: kind.clone(),
+            status: result.status.clone(),
+            risk: result.risk.clone(),
+            summary: result.summary.clone(),
+            findings: serde_json::to_string(&result.findings)?,
+            created_at: util::now(),
+        };
+        self.db.insert_audit(&row)?;
+        crate::ops::audit_log(
+            &self.library()?,
+            "capability.audit",
+            serde_json::json!({
+                "capabilityId": capability.id,
+                "version": version.version_label,
+                "kind": kind,
+                "status": result.status,
+                "risk": result.risk,
+            }),
+        );
+        Ok(CapabilityAudit {
+            id: row.id,
+            capability_id: capability.id,
+            version_id: version.id,
+            version_label: version.version_label,
+            kind,
+            status: result.status,
+            risk: result.risk,
+            summary: result.summary,
+            findings: result.findings,
+            created_at: row.created_at,
+        })
+    }
+
+    pub fn skill_dependencies(&self, request: AuditRequest) -> Result<DependencyReport> {
+        let (capability, version) =
+            self.resolve_version(&request.capability_id, request.version_id.as_deref())?;
+        let root = PathBuf::from(&version.storage_path);
+        if !root.is_dir() {
+            return Err(Error::not_found(format!(
+                "library copy is missing: {}",
+                root.display()
+            )));
+        }
+        let result = crate::deps::check_skill_dependencies(&root);
+        let checked_at = util::now();
+        self.db.insert_dependency_report(&crate::db::DependencyRow {
+            id: util::new_id(),
+            capability_id: capability.id.clone(),
+            version_id: version.id.clone(),
+            status: result.status.clone(),
+            risk: result.risk.clone(),
+            summary: result.summary.clone(),
+            items: serde_json::to_string(&result.items)?,
+            checked_at: checked_at.clone(),
+        })?;
+        Ok(DependencyReport {
+            capability_id: capability.id,
+            version_id: version.id,
+            status: result.status,
+            risk: result.risk,
+            summary: result.summary,
+            items: result.items,
+            checked_at,
+        })
+    }
+
+    pub fn list_audits(&self, capability_id: &str, limit: usize) -> Result<Vec<CapabilityAudit>> {
+        let rows = self.db.list_audits(capability_id, limit)?;
+        let mut out = Vec::new();
+        for row in rows {
+            let version_label = self
+                .db
+                .get_version(&row.version_id)?
+                .map(|version| version.version_label)
+                .unwrap_or_default();
+            let findings = serde_json::from_str(&row.findings).unwrap_or_default();
+            out.push(CapabilityAudit {
+                id: row.id,
+                capability_id: row.capability_id,
+                version_id: row.version_id,
+                version_label,
+                kind: row.kind,
+                status: row.status,
+                risk: row.risk,
+                summary: row.summary,
+                findings,
+                created_at: row.created_at,
+            });
+        }
+        Ok(out)
+    }
+
+    pub fn list_validations(&self, capability_id: &str, limit: usize) -> Result<Vec<ValidationRun>> {
+        let rows = self.db.list_validation_runs(capability_id, limit)?;
+        let mut out = Vec::new();
+        for row in rows {
+            let version_label = self
+                .db
+                .get_version(&row.version_id)?
+                .map(|version| version.version_label)
+                .unwrap_or_default();
+            let agent = match &row.agent_id {
+                Some(agent_id) => self.db.get_agent(agent_id)?,
+                None => None,
+            };
+            out.push(ValidationRun {
+                id: row.id,
+                capability_id: row.capability_id,
+                version_id: row.version_id,
+                version_label,
+                agent_id: row.agent_id,
+                agent_key: agent.as_ref().map(|agent| agent.key.clone()),
+                agent_name: agent.map(|agent| agent.name),
+                kind: row.kind,
+                status: row.status,
+                case_name: row.case_name,
+                notes: row.notes,
+                evidence: row.evidence,
+                actor: "user".to_string(),
+                created_at: row.created_at,
+            });
+        }
+        Ok(out)
+    }
+
+    pub fn record_validation(&self, request: ValidationRequest) -> Result<ValidationRun> {
+        let _guard = self.write_lock.lock().map_err(|_| Error::msg("lock poisoned"))?;
+        let allowed = ["passed", "failed", "needs_attention", "unverified"];
+        if !allowed.contains(&request.status.as_str()) {
+            return Err(Error::msg(
+                "validation status must be passed, failed, needs_attention or unverified",
+            ));
+        }
+        if request.case_name.trim().is_empty() {
+            return Err(Error::msg("a validation case name is required"));
+        }
+        let (capability, version) =
+            self.resolve_version(&request.capability_id, request.version_id.as_deref())?;
+        if let Some(agent_id) = &request.agent_id {
+            self.db
+                .get_agent(agent_id)?
+                .ok_or_else(|| Error::not_found("agent does not exist"))?;
+        }
+        let kind = request.kind.unwrap_or_else(|| "manual".to_string());
+        if !["manual", "static", "environment", "regression"].contains(&kind.as_str()) {
+            return Err(Error::msg("invalid validation kind"));
+        }
+        let id = util::new_id();
+        self.db.insert_validation_run(&crate::db::ValidationRow {
+            id: id.clone(),
+            capability_id: capability.id.clone(),
+            version_id: version.id.clone(),
+            agent_id: request.agent_id.clone(),
+            kind: kind.clone(),
+            status: request.status.clone(),
+            case_name: request.case_name.clone(),
+            notes: request.notes.clone().unwrap_or_default(),
+            evidence: request.evidence.clone().unwrap_or_default(),
+            created_at: util::now(),
+        })?;
+        crate::ops::audit_log(
+            &self.library()?,
+            "capability.validation",
+            serde_json::json!({
+                "capabilityId": capability.id,
+                "version": version.version_label,
+                "agentId": request.agent_id,
+                "status": request.status,
+                "case": request.case_name,
+            }),
+        );
+        let (agent_key, agent_name) = match &request.agent_id {
+            Some(agent_id) => {
+                let agent = self
+                    .db
+                    .get_agent(agent_id)?
+                    .ok_or_else(|| Error::not_found("agent does not exist"))?;
+                (Some(agent.key), Some(agent.name))
+            }
+            None => (None, None),
+        };
+        Ok(ValidationRun {
+            id,
+            capability_id: capability.id,
+            version_id: version.id,
+            version_label: version.version_label,
+            agent_id: request.agent_id,
+            agent_key,
+            agent_name,
+            kind,
+            status: request.status,
+            case_name: request.case_name,
+            notes: request.notes.unwrap_or_default(),
+            evidence: request.evidence.unwrap_or_default(),
+            actor: "user".to_string(),
+            created_at: util::now(),
+        })
+    }
+
+    pub fn skill_health(&self, capability_id: &str) -> Result<CapabilityHealth> {
+        let capability = self
+            .db
+            .get_capability(capability_id)?
+            .ok_or_else(|| Error::not_found("skill does not exist"))?;
+        if capability.kind != "skill" {
+            return Err(Error::unsupported("only skills have health records"));
+        }
+        let version = match &capability.current_version_id {
+            Some(version_id) => self.db.get_version(version_id)?,
+            None => None,
+        };
+        let Some(version) = version else {
+            return Ok(CapabilityHealth {
+                capability_id: capability.id.clone(),
+                slug: capability.slug.clone(),
+                name: capability.name.clone(),
+                description: capability.description.clone(),
+                version_label: String::new(),
+                status: HealthState::NotDeployed,
+                reasons: vec!["skill has no stored version".to_string()],
+                audit: None,
+                environment: None,
+                validations: Vec::new(),
+                installation_count: 0,
+                agent_keys: Vec::new(),
+                verified_agent_keys: Vec::new(),
+                last_checked_at: None,
+            });
+        };
+        let audit = self
+            .db
+            .latest_audit(&capability.id, &version.id, "static")?
+            .map(|row| CapabilityAudit {
+                id: row.id,
+                capability_id: row.capability_id,
+                version_id: row.version_id,
+                version_label: version.version_label.clone(),
+                kind: row.kind,
+                status: row.status,
+                risk: row.risk,
+                summary: row.summary,
+                findings: serde_json::from_str(&row.findings).unwrap_or_default(),
+                created_at: row.created_at,
+            });
+        let environment = self
+            .db
+            .latest_dependency_report(&capability.id, &version.id)?
+            .map(|row| DependencyReport {
+                capability_id: row.capability_id,
+                version_id: row.version_id,
+                status: row.status,
+                risk: row.risk,
+                summary: row.summary,
+                items: serde_json::from_str(&row.items).unwrap_or_default(),
+                checked_at: row.checked_at,
+            });
+        let validations: Vec<ValidationRun> = self
+            .list_validations(&capability.id, 100)?
+            .into_iter()
+            .filter(|run| run.version_id == version.id)
+            .collect();
+        let installations: Vec<InstallationRow> = self
+            .db
+            .list_installations_for_capability(&capability.id)?
+            .into_iter()
+            .filter(|row| row.kind == "skill")
+            .collect();
+        let mut agent_keys = Vec::new();
+        for installation in &installations {
+            if let Some(agent) = self.db.get_agent(&installation.agent_id)? {
+                agent_keys.push(agent.key);
+            }
+        }
+        agent_keys.sort();
+        agent_keys.dedup();
+        let (status, reasons) =
+            crate::validation::derive_health(audit.as_ref(), environment.as_ref(), &validations, &agent_keys);
+        let verified_agent_keys: Vec<String> = validations
+            .iter()
+            .filter(|run| run.status == "passed" && run.kind == "manual")
+            .filter_map(|run| run.agent_key.clone())
+            .collect();
+        let last_checked_at = [
+            audit.as_ref().map(|audit| audit.created_at.clone()),
+            environment.as_ref().map(|deps| deps.checked_at.clone()),
+            validations.first().map(|run| run.created_at.clone()),
+        ]
+        .into_iter()
+        .flatten()
+        .max();
+        Ok(CapabilityHealth {
+            capability_id: capability.id,
+            slug: capability.slug,
+            name: capability.name,
+            description: capability.description,
+            version_label: version.version_label,
+            status,
+            reasons,
+            audit,
+            environment,
+            validations,
+            installation_count: installations.len(),
+            agent_keys,
+            verified_agent_keys,
+            last_checked_at,
+        })
+    }
+
+    pub fn health_overview(&self) -> Result<HealthOverview> {
+        let skills = self.list_skills()?;
+        let mut capabilities = Vec::new();
+        for skill in &skills {
+            capabilities.push(self.skill_health(&skill.id)?);
+        }
+        let mut summary = HealthSummary {
+            total: capabilities.len(),
+            verified: 0,
+            unverified: 0,
+            needs_attention: 0,
+            failed: 0,
+            not_deployed: 0,
+            last_checked_at: None,
+        };
+        for capability in &capabilities {
+            match capability.status {
+                HealthState::Verified => summary.verified += 1,
+                HealthState::Unverified => summary.unverified += 1,
+                HealthState::NeedsAttention => summary.needs_attention += 1,
+                HealthState::Failed => summary.failed += 1,
+                HealthState::NotDeployed => summary.not_deployed += 1,
+            }
+            if let Some(checked_at) = &capability.last_checked_at {
+                if summary
+                    .last_checked_at
+                    .as_ref()
+                    .map(|current| checked_at > current)
+                    .unwrap_or(true)
+                {
+                    summary.last_checked_at = Some(checked_at.clone());
+                }
+            }
+        }
+        capabilities.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        Ok(HealthOverview {
+            summary,
+            capabilities,
+        })
+    }
+
+    /// Compute and persist the impact of moving a capability from one version to
+    /// another. Used both by the UI preview and by plan generation.
+    pub fn preview_update(&self, request: ImpactRequest) -> Result<UpdateImpact> {
+        let (capability, to_version) =
+            self.resolve_version(&request.capability_id, Some(&request.to_version_id))?;
+        let installations = self
+            .db
+            .list_installations_for_capability(&capability.id)?;
+        let from_version_id = match &request.from_version_id {
+            Some(version_id) => version_id.clone(),
+            None => installations
+                .iter()
+                .filter_map(|row| row.version_id.clone())
+                .next()
+                .or_else(|| capability.current_version_id.clone())
+                .ok_or_else(|| Error::msg("no installed version to compare against"))?,
+        };
+        if from_version_id == to_version.id {
+            return Err(Error::conflict("target version is already the compared version"));
+        }
+        if let Some(row) =
+            self.db
+                .latest_impact(&capability.id, &from_version_id, &to_version.id)?
+        {
+            if let Ok(mut impact) = serde_json::from_str::<UpdateImpact>(&row.payload) {
+                self.attach_impact_scope(&mut impact, &installations)?;
+                return Ok(impact);
+            }
+        }
+        let from_version = self
+            .db
+            .get_version(&from_version_id)?
+            .ok_or_else(|| Error::not_found("from version does not exist"))?;
+        let old_root = PathBuf::from(&from_version.storage_path);
+        let new_root = PathBuf::from(&to_version.storage_path);
+        if !old_root.is_dir() || !new_root.is_dir() {
+            return Err(Error::not_found("one of the library versions is missing on disk"));
+        }
+        let result = crate::impact::analyze_impact(&old_root, &new_root);
+        let mut impact = UpdateImpact {
+            id: util::new_id(),
+            capability_id: capability.id.clone(),
+            from_version_id: from_version.id.clone(),
+            from_version_label: from_version.version_label.clone(),
+            to_version_id: to_version.id.clone(),
+            to_version_label: to_version.version_label.clone(),
+            risk: result.risk,
+            summary: result.summary,
+            file_changes: result.file_changes,
+            classes: result.classes,
+            findings: result.findings,
+            affected_installation_count: 0,
+            affected_agent_keys: Vec::new(),
+            affected_project_roots: Vec::new(),
+            requires_revalidation: result.requires_revalidation,
+            created_at: util::now(),
+        };
+        self.attach_impact_scope(&mut impact, &installations)?;
+        self.db.insert_impact(&crate::db::ImpactRow {
+            id: impact.id.clone(),
+            capability_id: impact.capability_id.clone(),
+            from_version_id: impact.from_version_id.clone(),
+            to_version_id: impact.to_version_id.clone(),
+            risk: impact.risk.clone(),
+            summary: impact.summary.clone(),
+            payload: serde_json::to_string(&impact)?,
+            created_at: impact.created_at.clone(),
+        })?;
+        Ok(impact)
+    }
+
+    fn attach_impact_scope(
+        &self,
+        impact: &mut UpdateImpact,
+        installations: &[InstallationRow],
+    ) -> Result<()> {
+        let project_roots = self.project_roots()?;
+        let mut agent_keys = Vec::new();
+        let mut roots = Vec::new();
+        for installation in installations {
+            if let Some(agent) = self.db.get_agent(&installation.agent_id)? {
+                agent_keys.push(agent.key);
+            }
+            for root in &project_roots {
+                if Path::new(&installation.target_path).starts_with(root) {
+                    roots.push(root.to_string_lossy().to_string());
+                }
+            }
+        }
+        agent_keys.sort();
+        agent_keys.dedup();
+        roots.sort();
+        roots.dedup();
+        impact.affected_installation_count = installations.len();
+        impact.affected_agent_keys = agent_keys;
+        impact.affected_project_roots = roots;
+        Ok(())
+    }
+
+    pub fn agent_health_report(&self, record: bool) -> Result<AgentHealthReport> {
+        self.sync_agents()?;
+        let agents = self.list_agents()?;
+        let mut out = Vec::new();
+        for agent in agents {
+            let version = match &agent.app_path {
+                Some(app_path) => crate::agent_health::detect_app_version(Path::new(app_path)),
+                None => None,
+            };
+            let version = match version {
+                Some(version) => Some(version),
+                None if agent.key == "dsh" => crate::agent_health::detect_binary_version("dsh"),
+                None => None,
+            };
+            let latest = if record {
+                Some(self.db.record_agent_version(
+                    &agent.id,
+                    version.as_deref(),
+                    &agent.key,
+                )?)
+            } else {
+                self.db.latest_agent_version(&agent.id)?
+            };
+            let mut notes = agent.notes.clone();
+            let version_changed = latest.as_ref().map(|row| row.changed).unwrap_or(false);
+            if version_changed {
+                if let Some(row) = &latest {
+                    notes.push(format!(
+                        "Agent version changed from {} to {}; re-run scan and re-record validation evidence.",
+                        row.previous_version.clone().unwrap_or_else(|| "unknown".to_string()),
+                        row.version.clone().unwrap_or_else(|| "unknown".to_string())
+                    ));
+                }
+            }
+            if agent
+                .skill_roots
+                .iter()
+                .all(|root| !root.exists)
+            {
+                notes.push("No skill root exists on disk yet.".to_string());
+            }
+            out.push(AgentHealth {
+                agent_id: agent.id,
+                agent_key: agent.key,
+                agent_name: agent.name,
+                status: agent.status,
+                version: latest.as_ref().and_then(|row| row.version.clone()),
+                previous_version: latest.as_ref().and_then(|row| row.previous_version.clone()),
+                version_changed,
+                version_changed_at: latest
+                    .as_ref()
+                    .filter(|row| row.changed)
+                    .map(|row| row.detected_at.clone()),
+                paths_ok: agent
+                    .skill_roots
+                    .iter()
+                    .any(|root| root.exists)
+                    || agent.mcp_targets.iter().any(|target| target.exists),
+                notes,
+                checked_at: latest
+                    .as_ref()
+                    .map(|row| row.detected_at.clone())
+                    .unwrap_or_else(util::now),
+            });
+        }
+        Ok(AgentHealthReport {
+            checked_at: util::now(),
+            agents: out,
+        })
     }
 
     // -- MCP (implemented in mcp.rs) ---------------------------------------

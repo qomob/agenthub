@@ -1,6 +1,6 @@
 # AgentHub UI 规格（UI-SPEC）
 
-> 状态基准：2026-10-20 15:56。**以 `src/**` 的真实实现为准**：设计 token、组件样式、i18n、状态映射、store、Tauri 调用、router、App/main、11 个视图与 17 个组件均已落地；`pnpm build` 与 21 个前端测试通过。GUI 已在隔离 home 下完成人工运行验收（截图见 [ACCEPTANCE-REPORT.md](ACCEPTANCE-REPORT.md)），自动化回归待补。
+> 状态基准：2026-10-20 16:24。**以 `src/**` 的真实实现为准**：第二轮新增 `/health` 页、SkillDetail 健康面板（审计/依赖/影响/验证证据）、Agents 版本健康、Dashboard/Skills 健康摘要、Plan 影响摘要；当前 11 条路由/12 视图/20 组件，`pnpm build` 与 **7 files / 29 tests** 通过。GUI 已在隔离 home 下完成人工运行验收（截图见 [docs/evidence/](evidence/)），自动化回归待补。
 > 关联：[PRD.md](PRD.md)、[ARCHITECTURE.md](ARCHITECTURE.md)、[SECURITY.md](SECURITY.md)、[TEST-PLAN.md](TEST-PLAN.md)
 
 ---
@@ -18,7 +18,7 @@
 
 ## 1. 信息架构
 
-### 1.1 导航（i18n `nav.*`，9 项）
+### 1.1 导航（i18n `nav.*`，10 项）
 
 | 分组（`nav.groups`） | 页面 | 实际路由（`src/router.ts`） | 主要数据来源 |
 |---|---|---|---|
@@ -30,14 +30,15 @@
 | capabilities | 插件 Plugins | `/plugins` | `plugins_sync`（只读） |
 | workspace | Profiles | `/profiles` | `profiles_list`、`profiles_upsert`、`profiles_delete`、`profiles_plan_apply` |
 | workspace | 活动与诊断 Activity | `/activity` | `operations_list`、`operations_get`、`snapshots_list`、`backups_list`、`backups_create`、`app_doctor`、`app_check_changes` |
+| validation | 健康验证 Health | `/health` | `health_overview`、`agent_health`、`skills_health` |
 | system | 设置 Settings | `/settings` | `app_settings`、`app_update_settings`、`app_project_roots`、`app_set_project_roots` |
 | （启动流程） | Onboarding | 无独立路由；`App.vue` 在 `initialized=false` 时渲染 `OnboardingView` | `app_bootstrap`、`app_mark_initialized`、`app_scan` |
 
 新增/已使用的 API 字段：`AgentView.customSkillRoots`（Agents 页编辑自定义根）、`McpServerView.headers`（MCP 编辑表单展示/保存 headers）；CLI 另有 `skills uninstall`，不属于 UI。
 
-路由实现：`createWebHashHistory`（`src/router.ts`），`/` 与未匹配路径重定向 `/dashboard`；导航顺序即 `⌘1`–`⌘9` 顺序（dashboard/agents/skills/matrix/mcp/plugins/profiles/activity/settings）。
+路由实现：`createWebHashHistory`（`src/router.ts`），`/` 与未匹配路径重定向 `/dashboard`；导航顺序即 `⌘1`–`⌘9`（dashboard/agents/skills/matrix/mcp/plugins/profiles/activity/health），设置无快捷键。
 
-> 任务书要求「8+1 页面」：Dashboard / Agents / Skills / MCP / Plugins / Profiles / Activity / Settings + Onboarding。实际导航额外包含 **能力矩阵 Matrix**（`nav.matrix`），并把「诊断」并入「活动与诊断」；两者都按本规格实现。
+> 页面范围：第一轮 8+1（Dashboard / Agents / Skills / MCP / Plugins / Profiles / Activity / Settings + Onboarding），实际额外包含 **能力矩阵 Matrix** 与第二轮 **健康验证 Health**；「诊断」并入「活动与诊断」。健康页与 SkillDetail 健康四区块在 §2.10 / §2.3 定义。
 
 ### 1.2 布局骨架（已实现样式）
 
@@ -67,6 +68,7 @@
 | 库信息 | `libraryRoot`、`lastScanAt`、`initialized` | `Dashboard` 顶层字段 |
 
 **主操作**：扫描（`app_scan`）、检查外部变更（`app_check_changes`）、刷新（`app_dashboard`）、创建备份（`backups_create`，可放在 Activity）。
+**健康摘要卡**：展示 `healthTotal/Verified/NeedsAttention/Unverified/Failed/NotDeployed` 与「查看健康」入口（`dashboard.health*` i18n）；数字来自 `health_overview`，不得前端估算。
 **空态**：未初始化 → 引导 onboarding；无技能 → 「技能库 → 导入」；无 Agent → 说明仍可初始化。
 **禁止**：前端自己加总或估算统计；所有数字来自后端。
 **已知**：`scan_on_startup` 目前只是设置项，核心 `open()` 不自动扫描；仪表盘「扫描」按钮必须显式调用。
@@ -83,6 +85,8 @@
 | 编辑路径 | appPath、homePath、customSkillRoots（必须绝对路径） | `agents_update_paths` |
 | 项目根 | 全局设置的项目目录（用于项目级扫描/分发） | `app_project_roots` / `app_set_project_roots` |
 | 扫描 | 触发全量只读扫描并展示报告 | `app_scan` → `ScanReport` |
+| 版本健康 | 每个 Agent 的版本、previousVersion、versionChanged、pathsOk、checkedAt | `agent_health(record?)`；变化时提示重新扫描/验证 |
+| 路径健康 | `pathsOk`=skill root 或 MCP target 存在；无 root 提示 | `AgentHealth` |
 
 **状态**：`installed` 绿、`verification_required` 黄（显示 notes）、`not_installed` 灰、`unsupported` 灰、`error` 红（`status.ts`）。
 **关键提示**：
@@ -102,9 +106,17 @@
 | 大小/文件数 | 格式化字节（`formatBytes`） | `Skill.sizeBytes/fileCount` |
 | 冲突 | `conflict` 非空时警示徽章 | `Skill.conflict` |
 | 安装状态 | 已安装 Agent 数、漂移数、可更新 | `installations.length/driftCount/updateAvailable` |
+| 健康 | 健康状态、审计风险、原因摘要 | `skills_health` / `health_overview`（Skills 页可显示 health 列） |
 | 搜索/筛选 | 按名称、来源、标签、是否已安装 | 前端 |
 
 **详情**（`skill_detail` i18n）：SKILL.md 渲染（`parseSkillMd`，仅文本）、版本列表（`isCurrent`）、文件清单（`FileEntry[]`）、manifest、来源、安装矩阵（每个 Agent 的状态/路径/hash/策略/漂移）。
+
+**健康四区块（`SkillHealthPanel`）**：
+
+1. **安全审计**：运行 `skills_audit`；展示 status/risk/summary + finding 表格（severity/category/title/detail/path/suggestion）；空态「还没有审计记录」；不执行脚本。
+2. **依赖与环境**：运行 `skills_dependencies`；item 表（kind/name/required/found/status/detail/suggestion）；MCP/凭据显示 unknown 并解释。
+3. **更新影响**：选择目标版本 → `skills_preview_update`；展示 fileChanges（最多 500 条 + 「共 N 条」）、classes、风险、requiresRevalidation、受影响 Agent/安装。
+4. **验证证据**：`validations_list` + `validations_record`；记录 Agent（可空=通用）、用例名、status、notes、evidence；必须在 UI 明示「封闭 Agent 无法自动端到端测试，这是人工证据，不是自动通过」。
 
 **主操作**：
 1. 导入（选择器：文件夹 / zip / 单个 SKILL.md / Git URL + ref；`skills_import`）。
@@ -122,7 +134,7 @@
 
 - 行：技能；列：Agent；单元格状态由 `matrixCellState(skill, agent)` 计算，优先级：`unsupported agent → skill.conflict → installation.state → drift → update → installed/not_installed/verification`（`src/lib/status.ts:251-281`）。
 - 单元格点击：已安装 → 查看路径/卸载入口；未安装 → 加入分发选择；冲突/漂移 → 打开详情说明。
-- 状态色：`installed` success、`drift/conflict` warn、`missing/error` danger、`outdated` info、`verification` warn、`unsupported/not_installed` neutral。
+- 状态色：`installed` success、`drift/conflict` warn、`missing/error` danger、`outdated` info、`verification` warn、`unsupported/not_installed` neutral；健康状态另用 `verified` success / `unverified` neutral / `needs_attention` warn / `failed` danger / `not_deployed` slate。
 - 表头与首列 sticky（`styles.css:1648-1714`），居中提示「能力矩阵」。
 - **不提供批量静默操作**：批量选择后仍进入计划预览。
 
@@ -192,7 +204,23 @@
 **规则**：保存后立即刷新 bootstrap 与 UI 主题/语言；失败保留旧值并 toast 错误；库迁移提示「旧目录不会自动删除」。
 **禁止**：显示前端本地存储的设置副本作为真源（真源是 SQLite settings）。
 
-### 2.10 Onboarding（首次启动，5 步，`onboarding.steps`）
+### 2.10 Health（`nav.health`，`/health`）
+
+**目的**：一屏看清「哪些能力已验证、哪些需要处理、哪些根本没部署」。
+
+| 区块 | 内容 | 数据 |
+|---|---|---|
+| 健康摘要 | total / verified / needsAttention / unverified / failed / notDeployed + lastCheckedAt | `HealthOverview.summary` |
+| 筛选/搜索 | 状态 filter + 名称/slug/描述/reason 搜索 | 前端 `filterAndSortHealthCapabilities` |
+| 能力表 | 名称、当前版本、健康 badge、原因摘要、已部署 Agent、已验证 Agent、最近审计风险 | `CapabilityHealth[]` |
+| 重新检查 | 刷新 overview + `agent_health(true)` 记录版本；版本变化 toast | `health_overview`、`agent_health` |
+
+- 状态视觉：`verified` success、`unverified` neutral、`needs_attention` warn、`failed` danger、`not_deployed` slate；健康行按风险排序（failed → attention → unverified → not_deployed → verified）。
+- 空态：无能力 → 引导安装/导入；无匹配 → 调整筛选。
+- **硬规则**：UI 不得把「安装成功」显示成 verified；必须展示 reasons 与「Verified 需要审计与验证证据」提示。
+- 截图：[gui-health.png](evidence/gui-health.png)（Dashboard 健康区/健康入口；health 页截图未能自动点击时按 Lead 指示引用 Dashboard）。
+
+### 2.11 Onboarding（首次启动，5 步，`onboarding.steps`）
 
 | 步 | 内容 | 关键动作 |
 |---|---|---|
@@ -269,6 +297,21 @@ Profiles → 应用 → `profiles_plan_apply`（可能返回多个 plan 合并�
 - PlanAction：create=success、replace=info、remove=warn、noop=neutral、conflict=warn、blocked=danger。
 - OperationStatus：planned=info、running=accent、success=success、partial=warn、failed=danger、rolled_back=neutral。
 - Matrix：见 §2.4。
+
+### 4.3 验证/健康状态映射（`src/lib/health.ts`）
+
+| 域 | 状态 → Tone/文案 |
+|---|---|
+| HealthState | verified=success（已验证）、unverified=neutral（未验证）、needs_attention=warn（待处理）、failed=danger（失败）、not_deployed=slate（未部署） |
+| Audit status | pass=success、warn=warn、fail=danger、unknown=neutral |
+| Audit risk | info=neutral、low=info、medium=warn、high=danger、critical=danger |
+| Finding severity | info/low/medium/high/critical → 对应 badge，critical/high 红色 |
+| Dependency item | ok=success、missing=danger、warning=warn、unknown=neutral |
+| Environment status | healthy=success、needs_attention=warn、unknown=neutral |
+| Validation status | passed=success、failed=danger、needs_attention=warn、unverified=neutral |
+| Validation kind | manual/static/environment/regression 只作文本标签，不改变状态色 |
+
+**健康排序**：failed → needs_attention → unverified → not_deployed → verified（同状态按名称）。UI 不得把 installed 显示成 verified。
 
 ---
 
@@ -358,6 +401,7 @@ Profiles → 应用 → `profiles_plan_apply`（可能返回多个 plan 合并�
 4. **可追溯**：结果里展示 operation id、backupPath；Activity 可回看 plan/result。
 5. **失败**：失败/partial 时展示每项原因，不自动重试；提供回滚入口。
 6. **MCP 错误**：仅在目标条目真实变化时返回 `ExternalModification`；UI 展示真实错误并引导重新预览，**不得默认勾选 force**。
+7. **更新影响**：若计划是版本更新，弹窗顶部展示 `UpdateImpactSummary`：from→to、risk、classes、fileChanges（最多 500 条 + 总数）、受影响安装/Agent、`requiresRevalidation`。UI 不替代用户判断；重新验证提示必须可见。
 
 ---
 
@@ -367,7 +411,8 @@ Profiles → 应用 → `profiles_plan_apply`（可能返回多个 plan 合并�
 
 - **Dashboard**：Agent 6/9、技能 1、安装 2、MCP 1、插件 1、待更新 1、冲突/漂移 0、待处理 0；最近扫描 7 技能/重复 1/冲突 0/无效 0；操作历史可见卸载/MCP 分发/MCP 移除。截图：[gui-dashboard.png](evidence/gui-dashboard.png)。
 - **Onboarding**：第 1/5 步隐私与文件访问正常，同意复选框/下一步可用；5 步流程与 §2.10 一致。截图：[gui-onboarding.png](evidence/gui-onboarding.png)。
-- **界面**：中文文案正常；侧边栏 9 项导航（仪表盘/Agent/技能库/能力矩阵/MCP/插件/Profiles/活动与诊断/设置）。
+- **界面**：中文文案正常；侧边栏 10 项导航（仪表盘/Agent/技能库/能力矩阵/MCP/插件/Profiles/活动与诊断/健康验证/设置），健康=⌘9。
+- **健康页/健康摘要**：Dashboard 显示能力健康摘要卡（total/verified/needs_attention/unverified/failed/not_deployed）与「查看健康」；`/health` 页有摘要、状态筛选、搜索、能力表。截图：[gui-health.png](evidence/gui-health.png)（Dashboard 健康区；health 页未能自动点击时按 Lead 指示引用 Dashboard）。
 - **数据真实性**：Dashboard 数字与后端 `app_dashboard` 一致，无 mock；页面通过 Tauri 调用真实命令。
 - **未覆盖**：自动化 GUI 回归、真实窗口中的文件选择器/Keychain/opener、更多页面的深度交互。
 
@@ -416,6 +461,9 @@ Profiles → 应用 → `profiles_plan_apply`（可能返回多个 plan 合并�
 - [ ] Matrix 单元格状态与 `matrixCellState` 一致；点击可进入对应操作。
 - [x] MCP 新建/Keychain 设置/分发/移除：条目级 preflight 已修复；UI 人工验收覆盖列表/分发操作；`headers` 警示已展示。
 - [ ] MCP 真实外部修改场景的错误展示（自动化回归）。
+- [x] Health 页：摘要、筛选、搜索、健康 badge、原因列；Dashboard 健康摘要卡（人工验收，截图）。
+- [x] SkillDetail 四区块：安全审计/依赖与环境/更新影响/验证证据（人工验收；自动化待补）。
+- [x] 分发预览显示更新影响摘要与「需重新验证」提示（人工验收）。
 - [ ] Profiles 应用生成计划并可执行。
 - [ ] Activity 四个 Tab 数据齐全；回滚成功/失败均有反馈；快照与备份可查看。
 - [ ] Settings 修改语言/主题/策略/项目根立即生效并持久化。
@@ -441,23 +489,24 @@ Profiles → 应用 → `profiles_plan_apply`（可能返回多个 plan 合并�
 | 入口 | `index.html`、`vite.config.ts`（端口 1420，jsdom + vitest） | ✅ |
 | 路由 | `src/router.ts` | ✅ 已实现：hash 路由、10 条页面路由 + `/` 重定向、导航表与 `⌘1–9` 顺序 |
 | App 根组件 | `src/App.vue`、`src/main.ts` | ✅ 已实现：Pinia/i18n/router 挂载、启动 bootstrap、onboarding/shell 切换、错误横幅 |
-| 页面 | `src/pages/*` | ✅ 11 个视图（9 条导航路由 + 技能详情 + onboarding）；隔离 home GUI 人工验收通过（§6.5） |
-| 组件 | `src/components/*` | ✅ 已实现 17 个组件：Sidebar/BaseModal/ConfirmDialog/DataTable/EmptyState/ErrorBanner/Icon/LoadingState/OperationResultView/PageHeader/PlanDialog/PlanItemsTable/PlanPreview/SkillImportDialog/StatCard/StatusBadge/ToastHost |
-| 测试 | `src/lib/__tests__/*.spec.ts`、`src/__tests__/app-smoke.spec.ts` | ✅ 5 个文件 / 21 个测试通过（status/markdown/format/i18n/app-smoke） |
+| 页面 | `src/pages/*` | ✅ 12 个视图（10 条导航路由 + 技能详情 + onboarding；含 HealthView）；隔离 home GUI 人工验收通过（§6.5） |
+| 组件 | `src/components/*` | ✅ 20 个组件：新增 HealthStatusBadge、SkillHealthPanel、UpdateImpactSummary；其余同第一轮 |
+| 测试 | `src/lib/__tests__/*.spec.ts`、`src/__tests__/*.spec.ts` | ✅ **7 文件 / 29 测试**通过（新增 health-ui/health） |
 
-> 构建/测试状态快照（2026-10-20 16:00）：`pnpm build` 通过；`pnpm test` 5 文件 / 21 测试通过；完整 `pnpm tauri build` 已产出 `AgentHub.app` 与 `AgentHub_0.1.0_aarch64.dmg`（3.77 MiB，15:59），并已人工运行验收；首次 DMG 尝试因沙箱 hdiutil 权限失败，完整权限重跑成功；未签名/未公证。页面视觉以最终组件为准；token、状态映射、命令签名与文案 key 不应另造一套。
+> 构建/测试状态快照（2026-10-20 16:34）：`pnpm build` 通过；`pnpm test` **7 文件 / 29 测试**通过；完整 `pnpm tauri build` 已产出 0.2.0 `AgentHub.app`（7.49 MiB）与 `AgentHub_0.2.0_aarch64.dmg`（3.95 MiB，16:33–16:34），`/Applications/AgentHub.app` 已覆盖安装 0.2.0；首次 DMG 尝试因沙箱 hdiutil 权限失败，完整权限重跑成功；未签名/未公证。页面视觉以最终组件为准；token、状态映射、命令签名与文案 key 不应另造一套。
 
 ---
 
 ## 11. 状态标记（已验证 / 未验证 / 已知限制）
 
-- **已验证**：设计 token、i18n、状态映射、API 封装、router/App/11 个视图/17 个组件、`pnpm build`、21 个前端测试；隔离 home GUI 运行验收（Dashboard/onboarding/中文界面/活动历史）。
-- **未验证**：Tauri 自动化回归、原生文件选择器、真实 Keychain、原生 opener、完整分发→回滚的 GUI 点击流。
-- **已知限制**：未做 Playwright/XCUITest；MCP headers 明文提示已在 UI 展示但仍需安全侧修复；详情页未知字段只做结构展示。
+- **已验证**：设计 token、i18n、状态映射、API 封装、router/App/12 视图/20 组件、`pnpm build`、**29 个前端测试**；隔离 home GUI 运行验收（Dashboard/健康摘要/onboarding/中文界面/活动历史）。
+- **未验证**：Tauri 自动化回归、原生文件选择器、真实 Keychain、原生 opener、完整分发→回滚的 GUI 点击流、Health 页的自动化交互。
+- **已知限制**：未做 Playwright/XCUITest；静态审计是启发式、人工证据是用户输入（UI 已提示）；MCP headers 明文提示已在 UI 展示但仍需安全侧修复；详情页未知字段只做结构展示。
 
 ## 12. 交叉链接
 
 - GUI 验收证据：[ACCEPTANCE-REPORT.md](ACCEPTANCE-REPORT.md)
+- 验证方法论与状态机：[VALIDATION.md](VALIDATION.md)
 - 产品目标与功能状态：[PRD.md](PRD.md)
 - 数据字段与枚举：[DATA-MODEL.md](DATA-MODEL.md)、`src/lib/types.ts`
 - 分发/回滚/锁：[ARCHITECTURE.md](ARCHITECTURE.md)
