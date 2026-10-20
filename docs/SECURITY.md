@@ -10,7 +10,7 @@
 1. **Local First，无云端**：没有账号、遥测、云同步；网络访问只发生在用户主动使用 Git 导入时，由本机 `git` 完成（`skill.rs:462-505`）。核心 crate 不依赖任何 HTTP 客户端（`Cargo.toml`/`crates/agenthub-core/Cargo.toml` 无 reqwest/hyper 等）。
 2. **默认不破坏**：不覆盖非 AgentHub 拥有的目标；每次外部写入前先快照；失败逆序恢复；删除只针对已记录的安装。
 3. **能力诚实**：未验证的适配器能力标 `Unverified`/`VerificationRequired`，不假装可用（见 [ADAPTER-SPEC.md](ADAPTER-SPEC.md)）。
-4. **凭据不是内容**：MCP env 值只存 macOS Keychain；数据库只存 key 名。但 headers / 计划 JSON / 快照仍有明文风险（见 §5）。
+4. **凭据不是内容**：MCP env 值只存 macOS Keychain，数据库只存 key 名；分发计划 payload 已剥离 env、执行时从 Keychain 重建。headers / 快照仍有明文风险（见 §5）。
 5. **数据库不是密钥库**：Library、备份、快照、SQLite 都按普通用户文件保护，没有额外加密。
 
 > 重要：AgentHub 目前**不是 App Sandbox 应用**，没有 entitlements、没有代码签名/公证配置、没有内置提权。它以当前用户权限运行，能读写用户可访问的任意路径——安全边界依赖「路径白名单 + 事务 + 用户确认」，而不是操作系统沙箱。这是 MVP 的明确限制。
@@ -131,8 +131,10 @@
 
 MCP env 值：
   UI 输入 → /usr/bin/security add-generic-password（Keychain）
-        → 分发时 get_secret → 写入目标 Agent 配置文件（明文）
-        → 同时进入计划 JSON 的 payload（SQLite 明文）  ← 已知风险
+        → 计划阶段：payload 剥离 env（不落 SQLite 明文）
+        → 执行时 get_secret → 写入目标 Agent 配置文件（明文，Agent 需要）
+审计日志：
+  <library>/logs/operations.log ← 仅 id/kind/status/hash/error，不含 secret
 ```
 
 **没有**任何数据被发送到 AgentHub 服务器、分析服务或第三方；`git clone` 是唯一出站连接（用户显式触发）。
@@ -141,7 +143,7 @@ MCP env 值：
 
 1. 数据库只存 `env_keys`（key 名）与 `credential_refs`（引用）——**已实现（env）**。
 2. headers 值应视为凭据：不应明文入库；当前**未实现**（见 §6.2）。
-3. 日志不得包含 env/headers 值；当前**没有日志实现**，所以「未泄露」是因为没有日志，而不是因为脱敏（见 §6.4）。
+3. 日志不得包含 env/headers 值；当前 JSONL 审计只写 id/kind/status/hash/error，不写 secret（见 §6.4）。
 4. 备份/快照应排除凭据文件；当前**没有排除**——快照是整目录/整文件复制。
 5. UI 只显示 key、不显示 value；MCP 列表展示 `envKeys`，详情页应只显示「已设置/未设置」（`SecretState`）。
 
@@ -159,7 +161,7 @@ MCP env 值：
 | # | 风险 | 证据 | 建议/状态 |
 |---|---|---|---|
 | R1 | ~~MCP env 值进入 `operations.plan`~~ **已修复** | `mcp.rs:883-890`、`mcp.rs:959`、`mcp.rs:1111-1122` | 计划 payload 不再含 env；执行时从 Keychain 重建。**headers 值仍会进 payload**（见 R2） |
-| R2 | **headers 明文入库/入配置** | `mcp.rs:714`（存 headers）、`mcp.rs:466-470`（写入配置） | headers 可能含 `Authorization`；应改为 Keychain 引用或明确警告。当前未修复 |
+| R2 | **headers 明文入库/入配置** | `mcp.rs:712`（存 headers）、`mcp.rs:466-474`（写入配置） | headers 可能含 `Authorization`；UI 已警示，但仍应改为 Keychain 引用。当前未修复 |
 | R3 | **`security` argv 暴露 secret** | `mcp.rs:43-63`：`security add-generic-password ... -w <value>` | 同用户的其他进程可在极短窗口读到 argv；应改用 stdin/交互输入方式（`security` 支持从 stdin 读取时需验证） |
 | R4 | **快照/备份含明文凭据** | `snapshot_target` 整文件复制；`create_backup` 复制 DB | 备份目录应与库同权限保护；文档与 UI 应提示「快照可能含配置中的 token」 |
 | R5 | ~~MCP 非 force 被误报外部修改~~ **已修复** | `ops.rs:220-260`、`mcp.rs:1002-1060` | MCP preflight 改为按条目 hash；移除计划记录当前条目 hash。回归测试通过 |
@@ -177,6 +179,7 @@ MCP env 值：
 | R12 | 并发锁缺口 | import/设置/MCP 定义写入没有跨进程锁；GUI+CLI 同时操作可能竞争 |
 | R13 | GUI 已人工运行验收 | 隔离 home 下 Dashboard/onboarding 正常（见 ACCEPTANCE-REPORT）；仍无自动化注入/XSS 测试 |
 | R14 | 依赖供应链 | rusqlite/toml_edit/serde 等为常规依赖；无 `cargo audit` 记录（本次未执行） |
+| R15 | 签名/公证 | DMG 已产出；未签名/未公证；分发给他人前需完成 Developer ID + notarization |
 
 ### 6.3 用户确认点（产品必须保留）
 
@@ -209,8 +212,8 @@ MCP env 值：
 ## 6.5 状态标记（已验证 / 未验证 / 已知限制）
 
 - **已验证**：zip 边界（含绝对路径拒绝）、symlink 逃逸拒绝、原子写、快照/回滚、外部修改检测、Keychain 存储与缺失 blocked、损坏配置拒绝覆盖、MCP env 计划脱敏、JSONL 审计；本次测试、真实 Mac 验收与 GUI 验收覆盖。
-- **未验证**：真实 Keychain 正向写入（验收避免污染）、真实 MCP 配置写入、GUI 自动化注入测试、并发/中断/磁盘满、非 macOS、DMG/签名。
-- **已知限制**：headers 明文、secret argv、快照/备份含凭据、应用未沙箱/未签名、备份恢复未实现、DMG/签名未验证；见 §6/§7。
+- **未验证**：真实 Keychain 正向写入（验收避免污染）、真实 MCP 配置写入、GUI 自动化注入测试、并发/中断/磁盘满、非 macOS、签名/公证（DMG 已产出）。
+- **已知限制**：headers 明文、secret argv、快照/备份含凭据、应用未沙箱/未签名、备份恢复未实现、签名/公证未验证（DMG 已产出）；见 §6/§7。
 
 ## 7. 安全验收清单
 
@@ -224,7 +227,7 @@ MCP env 值：
 - [ ] Keychain 拒绝授权 → 错误可读、不泄露值、不写坏配置。
 - [x] UI：隔离 home 下 onboarding/Dashboard 正常（截图见 [ACCEPTANCE-REPORT.md](ACCEPTANCE-REPORT.md)）；XSS 自动化测试仍未覆盖。
 - [x] 真实 Mac：导入 → 分发 → 扫描 inSync → 更新 → 回滚 → 卸载 → 备份/doctor 全流程通过（副本见 `scripts/real-acceptance.sh`）。
-- [ ] DMG 打包/签名/公证在有权限环境验证。
+- [x] DMG 已产出（`AgentHub_0.1.0_aarch64.dmg`，3.77 MiB）；[ ] 签名/公证待完成。
 - [ ] 无网络：断网时除 Git 导入外全部功能可用。
 
 ---

@@ -16,7 +16,7 @@
 | CLI 集成测试 | `./scripts/cargo.sh test -p agenthub-cli` | **9 passed / 0 failed** | 含 dry-run 退出码、conflict、rollback、backup |
 | CLI 编译 | `./scripts/cargo.sh check -p agenthub-cli` | 通过 | — |
 | Tauri app 构建 | `pnpm tauri build --bundles app` | **通过** | 产物 `target/release/bundle/macos/AgentHub.app` |
-| DMG 打包 | `pnpm tauri build`（含 DMG） | ⚠️ 未产出 `.dmg` | 沙箱 hdiutil 权限失败；仅生成 `bundle_dmg.sh`，非代码问题 |
+| DMG 打包 | `pnpm tauri build`（含 DMG） | ✅ **已产出** | `AgentHub_0.1.0_aarch64.dmg`（3.77 MiB，15:59）；首次沙箱 hdiutil 尝试失败，完整权限重跑成功 |
 | 前端构建 | `pnpm build` | **通过** | `vue-tsc --noEmit` + Vite build 成功 |
 | 前端测试 | `pnpm test`（vitest） | **5 files / 21 tests passed** | status/markdown/format/i18n/app-smoke |
 | Tauri 自动化测试 | 未执行 | 未验证 | 无 `src-tauri` 测试；GUI 为人工验收 |
@@ -283,7 +283,7 @@ bash scripts/real-acceptance.sh
 | 项 | 风险 | 建议 |
 |---|---|---|
 | GUI 自动化 | 已人工运行验收，但无 Tauri 自动化回归 | 补 Playwright/XCUITest 或稳定的截图对比 |
-| DMG / 签名 / 公证 | 沙箱 hdiutil 失败；未签名 | 在有权限桌面会话重跑 `pnpm tauri build`；配置 Developer ID + notarization |
+| 签名 / 公证 | DMG 已产出；未签名/未公证 | 配置 Developer ID + notarization；验证 Gatekeeper |
 | Keychain 正向路径 | 未测（避免污染真实 Keychain） | 使用专用测试 service 前缀 + 清理，或标记 manual-only |
 | 并发/锁 | 未测 | 两进程同时 apply 的集成测试 |
 | 中断恢复 | 未测 | 在 apply 中注入失败/杀进程，验证快照与 DB 状态 |
@@ -299,8 +299,8 @@ bash scripts/real-acceptance.sh
 
 ## 6.5 状态标记（已验证 / 未验证 / 已知限制）
 
-- **已验证**：core 21 + CLI 9 = 30 个 Rust 测试、前端 21 个测试全部通过；`pnpm build`、`pnpm tauri build --bundles app` 通过；**真实 Mac 验收通过**（导入/分发/inSync/更新/回滚/卸载/备份/doctor）；GUI（隔离 home）人工验收通过。
-- **未验证**：DMG 打包（沙箱 hdiutil）、签名/公证、GUI 自动化、真实 Keychain 正向、真实 MCP 配置写入、并发/中断/磁盘满、备份恢复、非 macOS。
+- **已验证**：core 21 + CLI 9 = 30 个 Rust 测试、前端 21 个测试全部通过；`pnpm build`、完整 `pnpm tauri build`（.app + .dmg）通过；**真实 Mac 验收通过**（导入/分发/inSync/更新/回滚/卸载/备份/doctor）；GUI（隔离 home）人工验收通过。
+- **未验证**：签名/公证（DMG 已产出）、GUI 自动化、真实 Keychain 正向、真实 MCP 配置写入、并发/中断/磁盘满、备份恢复、非 macOS。
 - **已知限制**：核心缺纯函数单元测试；前端无 Tauri 运行时测试；部分场景仅手工（见 §6）；测试受 `/Applications` 真实 app 影响。
 
 ## 7. 交叉链接

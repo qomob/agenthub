@@ -60,12 +60,13 @@
 - [x] GUI 运行验收（隔离 home Dashboard/onboarding；真实分发→回滚点击流仍建议补）
 - [x] 真实 Mac 写入验收（唯一 slug，部署最终删除、库保留 2 版本）
 - [x] `pnpm tauri build --bundles app` 通过并安装 `/Applications/AgentHub.app`
-- [ ] `pnpm tauri build` 的 DMG / 签名 / 公证（沙箱 hdiutil 受限）
+- [x] 完整 `pnpm tauri build`：产出 `AgentHub.app`（7.14 MiB）与 `AgentHub_0.1.0_aarch64.dmg`（3.77 MiB，15:59），覆盖安装 `/Applications`
+- [ ] 签名 / 公证（Developer ID + notarization）
 - [ ] `./scripts/cargo.sh test --workspace` 全绿（当前只跑 core/CLI）
 
 **收尾优先级**
 
-1. DMG/签名/公证（有权限桌面会话）。
+1. 签名/公证（Developer ID + notarization）；验证 Gatekeeper。
 2. GUI 自动化回归（Dashboard/分发/回滚点击流）与核心纯函数单元测试。
 3. MCP headers 凭据化；备份恢复；`target_within_roots` 接入。
 4. 真实 profile 既有 conflicts/duplicates 的提示与清理策略。
@@ -145,7 +146,7 @@
 | R8 | **GUI 自动化缺失** | 中 / 中 | 只有人工截图验收 | 补 Playwright/XCUITest；保留 UI-SPEC §9 清单 |
 | R9 | **误写真实 Agent 目录** | 低 / 高 | 隔离测试 + 一次授权真实验收；目标最终删除 | 预览确认、默认 copy、快照、唯一 slug、失败清理 |
 | R10 | **无人值守的格式保真承诺** | 中 / 中 | JSON 会重排缩进；TOML 保注释 | 文档明确「结构保真、格式不保真」；UI diff 提示 |
-| R11 | **DMG/签名/公证** | 高 / 中 | 沙箱 hdiutil 失败；未签名 | 有权限桌面会话重跑 `pnpm tauri build`；Developer ID + notarization |
+| R11 | **签名/公证** | 中 / 中 | DMG 已产出；未签名/未公证 | 配置 Developer ID + notarization；验证 Gatekeeper |
 
 ---
 
@@ -156,19 +157,20 @@
 | M1「核心可用」 | core+CLI 测试全绿；真实 Mac 五步验收通过（已达成） |
 | M2「GUI 可用」 | 9 路由 + Onboarding；隔离 home 运行验收通过；无 mock/死按钮（已达成；自动化待补） |
 | M3「MCP 可用」 | 无 force 的分发/移除/回滚全绿；env 不落计划（已达成）；headers 待加固 |
-| M4「可发布 0.1.0」 | M1+M2+M3；DMG/签名/公证；已知限制清单公开（当前差 DMG/签名） |
+| M4「可发布 0.1.0」 | M1+M2+M3；app+DMG 已构建；签名/公证；已知限制清单公开（当前差签名/公证） |
 
 ---
 
 ## 9. 状态标记（已验证 / 未验证 / 已知限制）
 
 - **已验证**：Phase 0 调研；Phase 1 真实 Mac + GUI 验收；Phase 2 MCP 正常路径与 env 脱敏；Phase 3 页面/构建/GUI 运行；core 21、CLI 9、前端 21 测试通过。
-- **未验证**：DMG、签名/公证、GUI 自动化、真实 Keychain 正向、真实 MCP 配置写入、并发/中断、非 macOS；Phase 4 全部未开始。
-- **已知限制**：headers 明文、备份恢复未实现、`target_within_roots`、核心单元测试缺失、DMG/签名；见 §7 风险登记。
+- **未验证**：签名/公证（DMG 已产出）、GUI 自动化、真实 Keychain 正向、真实 MCP 配置写入、并发/中断、非 macOS；Phase 4 全部未开始。
+- **已知限制**：headers 明文、备份恢复未实现、`target_within_roots`、核心单元测试缺失、签名/公证；见 §7 风险登记。
 
 ## 10. 交叉链接
 
 - 当前功能状态：[README.md](../README.md)、[PRD.md](PRD.md)
 - 适配器证据与未验证项：[ADAPTER-SPEC.md](ADAPTER-SPEC.md)、[AGENT-COMPATIBILITY.md](AGENT-COMPATIBILITY.md)
+- 真实验收：[ACCEPTANCE-REPORT.md](ACCEPTANCE-REPORT.md)
 - 测试基线：[TEST-PLAN.md](TEST-PLAN.md)
 - 安全剩余风险：[SECURITY.md](SECURITY.md)

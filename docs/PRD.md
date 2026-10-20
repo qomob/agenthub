@@ -121,7 +121,7 @@ MVP **不面向**团队协作、企业管控、非 macOS 平台。
 | 目标路径必须位于白名单根 | ⚠️ | `target_within_roots` 存在但**没有调用方** |
 | UI/CLI | ⛔ | 无 |
 
-**验收标准**：一次向 2 个 Agent 分发，任一失败时两个目标都回到原状；回滚后文件内容 hash 与操作前一致；操作记录可在 Activity 中看到（UI 待落地）。
+**验收标准**：一次向 2 个 Agent 分发，任一失败时两个目标都回到原状；回滚后文件内容 hash 与操作前一致；操作记录可在 Activity 中看到。真实 Mac 已验证 2 Agent copy、更新、回滚、卸载。
 
 ### D. 快照、回滚与变更检测
 
@@ -158,7 +158,7 @@ MVP **不面向**团队协作、企业管控、非 macOS 平台。
 | DSH Cordis YAML codec | ⛔ | 未实现，DSH 无 MCP 目标 |
 | UI | ⛔ | 无 |
 
-**验收标准（待执行路径修复后）**：向 Codex 写 stdio server，`config.toml` 其他段与注释保持；写第二个 server 不覆盖第一个；失败时整份配置恢复到操作前；env 值不出现在 UI 列表与日志。
+**验收标准**：向 Codex 写 stdio server，`config.toml` 其他段与注释保持；写第二个 server 不覆盖第一个；失败时整份配置恢复到操作前；env 值不出现在 UI 列表、`operations.plan` 或日志。当前 MCP 写入由集成测试覆盖；真实 MCP 配置未在验收中改动。
 
 ### F. 插件只读清单与 Profiles
 
@@ -303,14 +303,14 @@ CLI 验收时加 `--home /tmp/agenthub-accept/home`（等价于 `AGENTHUB_HOME`�
 | 问题 | 影响 | 处理 |
 |---|---|---|
 | ~~MCP 执行路径缺陷~~ | 已修复：条目级 preflight + 执行接通 | 回归测试已覆盖；继续补 MCP 回滚测试 |
-| GUI 未做运行时验收 | 页面已构建，但未验证 Tauri 后端联调 | 按 TEST-PLAN §5.2 / UI-SPEC §9 在桌面窗口内验收 |
-| 真实 Agent 目录写入风险 | 误写可能影响用户日常使用 | 默认隔离 home 验收；UI 强制预览 + 确认 |
+| 签名/公证未完成 | app 与 DMG 已构建/安装；未签名/未公证 | 配置 Developer ID + notarization |
+| 真实 Agent 目录写入风险 | 误写可能影响用户日常使用 | 默认隔离 home；真实验收使用唯一 slug、目标不存在才执行、失败清理，并已获用户授权 |
 | Adapter 证据漂移 | 私有格式变化导致写入无效 | 文档标注证据日期；codec 独立测试 |
 | DSH symlink 声明与证据不一致 | 默认 copy，浪费已验证能力 | 证据复核后改 `Supported` |
 | Keychain 授权 | `security` CLI 首次可能弹授权/拒绝 | 诊断页显示 `keychainAvailable`；失败给出提示 |
 
 ## 9. 已验证 / 未验证 / 已知限制
 
-- **已验证**：核心引擎与 CLI 的扫描/导入/分发/回滚/备份；MCP 分发与移除（集成测试）；前端构建与 21 个前端测试；隔离 home 下的首版验收主流程。
-- **未验证**：GUI 在 Tauri 窗口内的全链路；`pnpm tauri build`；真实 Keychain 写入；真实 Agent 目录写入；Windows/Linux；部分 adapter 路径与 symlink 行为。
-- **已知限制**：插件只读、不试连 MCP、无云同步/市场；导入与扫描不记 operations；无日志与备份恢复；MCP 敏感值问题；`VerificationRequired` 仍允许安装；详见 §8 与 [SECURITY.md](SECURITY.md)。
+- **已验证**：真实 Mac 验收（导入/分发/扫描 inSync/更新/回滚/卸载/备份/doctor）；GUI（隔离 home）运行验收；core 21 + CLI 9 + 前端 21 测试、`pnpm build`、`pnpm tauri build --bundles app`。
+- **未验证**：签名/公证（DMG 已产出）、GUI 自动化、真实 Keychain 正向写入、真实 MCP 配置写入、并发/中断、Windows/Linux、部分 adapter 路径与 symlink 行为。
+- **已知限制**：插件只读、不试连 MCP、无云同步/市场；扫描不写 operations；备份恢复未实现；MCP headers 明文；`VerificationRequired` 仍允许安装；详见 §8 与 [SECURITY.md](SECURITY.md)。

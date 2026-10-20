@@ -445,7 +445,7 @@ Profiles → 应用 → `profiles_plan_apply`（可能返回多个 plan 合并�
 | 组件 | `src/components/*` | ✅ 已实现 17 个组件：Sidebar/BaseModal/ConfirmDialog/DataTable/EmptyState/ErrorBanner/Icon/LoadingState/OperationResultView/PageHeader/PlanDialog/PlanItemsTable/PlanPreview/SkillImportDialog/StatCard/StatusBadge/ToastHost |
 | 测试 | `src/lib/__tests__/*.spec.ts`、`src/__tests__/app-smoke.spec.ts` | ✅ 5 个文件 / 21 个测试通过（status/markdown/format/i18n/app-smoke） |
 
-> 构建/测试状态快照（2026-10-20 15:56）：`pnpm build` 通过；`pnpm test` 5 文件 / 21 测试通过；`pnpm tauri build --bundles app` 通过并已人工运行验收；DMG 在沙箱内因 hdiutil 权限失败。页面视觉以最终组件为准；token、状态映射、命令签名与文案 key 不应另造一套。
+> 构建/测试状态快照（2026-10-20 16:00）：`pnpm build` 通过；`pnpm test` 5 文件 / 21 测试通过；完整 `pnpm tauri build` 已产出 `AgentHub.app` 与 `AgentHub_0.1.0_aarch64.dmg`（3.77 MiB，15:59），并已人工运行验收；首次 DMG 尝试因沙箱 hdiutil 权限失败，完整权限重跑成功；未签名/未公证。页面视觉以最终组件为准；token、状态映射、命令签名与文案 key 不应另造一套。
 
 ---
 
@@ -457,6 +457,7 @@ Profiles → 应用 → `profiles_plan_apply`（可能返回多个 plan 合并�
 
 ## 12. 交叉链接
 
+- GUI 验收证据：[ACCEPTANCE-REPORT.md](ACCEPTANCE-REPORT.md)
 - 产品目标与功能状态：[PRD.md](PRD.md)
 - 数据字段与枚举：[DATA-MODEL.md](DATA-MODEL.md)、`src/lib/types.ts`
 - 分发/回滚/锁：[ARCHITECTURE.md](ARCHITECTURE.md)

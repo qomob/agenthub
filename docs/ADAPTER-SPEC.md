@@ -279,8 +279,8 @@ resolved_mcp_targets(home):
 | 缺陷 | 证据 | 影响 |
 |---|---|---|
 | MCP 删除留空表/空对象 | `mcp.rs:203-277` | 删除条目后 TOML 保留空 `[mcp_servers]`，JSON 保留空 `servers` 对象（格式噪音） |
-| MCP 删除留空表 | `mcp.rs:203-300` | 删除条目后 TOML 保留空 `[mcp_servers]`，JSON 保留空 `servers` 对象（格式噪音） |
-| `scan_results.scope` 恒 NULL | `db.rs:1366` | 扫描结果无法按 scope 过滤 |
+| MCP env 不进入 plan（已修复） | `mcp.rs:883-890`、`mcp.rs:1111-1122` | 计划 payload 剥离 env；执行时从 Keychain 重建；headers 仍进 payload |
+| `headers` 字段名差异 | codec 写 `headers`；WorkBuddy 证据为 `staticHeaders` | WorkBuddy 远程条目可能不被识别（未验证） |
 | Codex 项目级根未声明 | `builtin.rs:127-137` | `<project>/.codex/skills` 不参与扫描/安装（证据仅 VR，属刻意留白） |
 | 同名 app 未按 CFBundleName 区分 | `builtin.rs:118-125`、`adapters/mod.rs:176-197` | ChatGPT.app 存在时 Codex 的 app 检测可能被误判（但 `~/.codex` 仍是主信号） |
 
@@ -288,7 +288,7 @@ resolved_mcp_targets(home):
 
 ## 8.5 状态标记（已验证 / 未验证 / 已知限制）
 
-- **已验证**：trait 契约与执行分离；9 个 adapter 的 id/key/roots/格式由代码定义；Codex/WorkBuddy 的发现与 MCP 写入路径有集成测试；DSH symlink 声明已与证据一致。
+- **已验证**：trait 契约与执行分离；9 个 adapter 的 id/key/roots/格式由代码定义；Codex/WorkBuddy 的发现与 MCP 写入路径有集成测试；DSH symlink 声明已与证据一致；真实 Mac 验收覆盖 Codex/ZCode 分发与扫描。
 - **未验证**：Codex 项目级根、Trae CN 项目根、ZCode 远程传输/原生项目配置、WorkBuddy `staticHeaders`、Claude/Cursor 实际安装、非 DSH symlink 行为。
 - **已知限制**：代码不调用任何 Agent CLI（无 native 管理）；ChatGPT 只读；同名 app 未按 CFBundleName 区分；MCP 删除留空表；见 §8。
 

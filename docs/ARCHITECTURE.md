@@ -414,7 +414,7 @@ MCP 的格式扩展点集中在 `mcp.rs`：
 | 6 | `scan_on_startup` 未在核心启动时生效 | `service.rs:117` 仅种值；`open()` 不扫描 | UI 在 `App.vue` 中按设置触发扫描；核心本身不自动扫描 |
 | 7 | 缺少核心纯函数单元测试 | core 集成 21、CLI 9、前端 21 | 关键纯函数（hash/codec）仍靠集成覆盖 |
 | 8 | 完整备份无恢复路径 | `library.rs` 只有 create/list | 备份只能手工拷回，UI 无恢复入口 |
-| 9 | 签名/公证与 DMG | 无签名配置；`target/release/bundle/dmg/` 无 `.dmg` 产物 | 本机构建 app 可用；分发给他人前需签名/公证，DMG 需权限环境重跑 |
+| 9 | 签名/公证 | DMG 已产出（`AgentHub_0.1.0_aarch64.dmg`，3.77 MiB，15:59）；无签名/公证配置 | 本机构建 app+DMG 可用；分发给他人前需 Developer ID 签名 + notarization |
 | 10 | `doctor().home` 命名 | `service.rs` 返回 `data_dir` | 字段名为历史遗留，实际是数据目录；文档/UI 标注为「数据目录」 |
 
 > 2026-10-20 15:24–15:56 期间已修复并验证：MCP 非 force preflight、MCP 执行接通、删除 stale key、MCP env 计划脱敏、`installations.scope` 记录、`scan_results.scope` 写入、import 审计、JSONL 操作日志、zip 绝对路径拒绝；见 [CHANGELOG.md](CHANGELOG.md)。
@@ -424,8 +424,8 @@ MCP 的格式扩展点集中在 `mcp.rs`：
 ## 9.5 状态标记（已验证 / 未验证 / 已知限制）
 
 - **已验证**：分层/事务/快照/回滚与 CLI 复用；隔离 home 全链路；**真实 Mac 验收**（真实库导入/分发/更新/回滚/卸载/备份/doctor，见 [ACCEPTANCE-REPORT.md](ACCEPTANCE-REPORT.md)）；GUI（隔离 home）运行；core 21、CLI 9、前端 21 测试通过。
-- **未验证**：DMG 打包（沙箱 hdiutil 权限）、签名/公证、GUI 自动化、真实 Keychain 正向写入、真实 MCP 配置写入、并发/中断/磁盘满、非 macOS。
-- **已知限制**：见上表（MCP 空表/headers、项目级安装语义、备份不可恢复、`target_within_roots` 未接入、无核心单元测试、DMG/签名）。
+- **未验证**：签名/公证（DMG 已产出）、GUI 自动化、真实 Keychain 正向写入、真实 MCP 配置写入、并发/中断/磁盘满、非 macOS。
+- **已知限制**：见上表（MCP 空表/headers、项目级安装语义、备份不可恢复、`target_within_roots` 未接入、无核心单元测试、签名/公证）。
 
 ## 10. 交叉链接
 

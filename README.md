@@ -2,7 +2,7 @@
 
 > 本机多 Agent 能力管理中心：把散落在 Codex、TRAE、ZCode、WorkBuddy、DeepSeek Harness 等 Agent 目录里的 **Skills / MCP / 插件清单** 集中登记，通过适配器与事务化写入分发到指定 Agent，出错可回滚。
 >
-> 状态快照：**2026-10-20 15:32（Asia/Shanghai）**。核心库、CLI、Tauri 命令层与前端页面均已落地；core 21、CLI 9、前端 21 个测试全部通过，`pnpm build` 通过。GUI 运行时（Tauri 窗口内全链路）与 `pnpm tauri build` 尚未验收。详见 [已知限制](#已知限制) 与 [docs/CHANGELOG.md](docs/CHANGELOG.md)。
+> 状态快照：**2026-10-20 16:00（Asia/Shanghai）**。核心库、CLI、Tauri 命令层与 GUI 均已落地；**真实 Mac 验收已通过**（真实 `~/.agenthub` + `~/.codex` + `~/.zcode`），**GUI 已在隔离 home 运行验收**，`AgentHub.app` 已构建并安装到 `/Applications`；core 21 + CLI 9 共 **30 个 Rust 测试**、前端 21 个测试全部通过，`pnpm build` 通过。本机完整构建已产出 `AgentHub.app` 与 `AgentHub_0.1.0_aarch64.dmg`（3.77 MiB，15:59）并覆盖安装到 `/Applications`；首次 DMG 尝试因沙箱 hdiutil 权限失败，随后在用户授权的完整权限下成功。详见 [docs/ACCEPTANCE-REPORT.md](docs/ACCEPTANCE-REPORT.md)、[已知限制](#已知限制)。
 
 AgentHub 是 **本地优先** 的 macOS 桌面应用（Tauri 2 + Vue 3 + Rust + SQLite），无账号、无云端、无遥测。GUI 与 CLI 共用同一个 `agenthub-core` 引擎。
 
@@ -11,6 +11,7 @@ AgentHub 是 **本地优先** 的 macOS 桌面应用（Tauri 2 + Vue 3 + Rust + 
 ## 目录
 
 - [状态标记](#状态标记)
+- [真实验收状态](#真实验收状态)
 - [核心原则](#核心原则)
 - [功能状态](#功能状态)
 - [环境要求](#环境要求)
@@ -28,9 +29,30 @@ AgentHub 是 **本地优先** 的 macOS 桌面应用（Tauri 2 + Vue 3 + Rust + 
 
 ## 状态标记
 
-- **已验证**：本次通读代码 + 在隔离 home 中用 CLI/harness 跑通的行为（扫描、导入、分发、回滚、备份、诊断；MCP TOML/JSON 写入）。测试：core 21、CLI 9、前端 21 全部通过；`pnpm build` 通过。
-- **未验证**：Tauri 窗口内的 GUI 全链路、`pnpm tauri build` 打包/签名、真实 Agent 目录写入、Keychain 正向写入、非 macOS 平台、部分 adapter 路径（Codex 项目级、Trae CN 项目根、ZCode 远程传输、WorkBuddy `staticHeaders`）。
-- **已知限制**：见下节；敏感数据（env 计划明文、headers 明文、secret argv、快照/备份含 token）与安全边界见 [docs/SECURITY.md](docs/SECURITY.md)。
+- **已验证**：真实 Mac 验收（真实库导入 → Codex/ZCode copy 分发 → 扫描 inSync → v2 更新 → 回滚精确 v1 → 卸载 → backup/doctor）；隔离 home GUI 运行验收；core 21 + CLI 9 = 30 个 Rust 测试、前端 21 个测试、`pnpm build`、`pnpm tauri build --bundles app` 均通过。
+- **未验证**：签名/公证（DMG 已产出，但未签名/未公证）、GUI 自动化回归、真实 Keychain 正向写入、真实 MCP 配置写入、并发/中断/磁盘满、非 macOS、部分 adapter 路径（Codex 项目级、Trae CN 项目根、ZCode 远程传输、WorkBuddy `staticHeaders`）。
+- **已知限制**：见下节；headers 明文、secret argv、快照/备份含 token、备份恢复未实现；安全边界见 [docs/SECURITY.md](docs/SECURITY.md)。
+
+## 真实验收状态
+
+**首版验收场景已在真实 Mac 通过（2026-10-20，用户批准）**：唯一 slug `agenthub-accept-155547` 导入真实 `~/.agenthub`，copy 分发到真实 `~/.codex/skills` 与 `~/.zcode/skills`（新建、无覆盖），扫描 `inSync=true`；导入 v2 后 `skills sync --dry-run` 检测到 `updates=1/plans=1`（仅有更新时**退出码 0**），`skills sync --yes` 更新，`skills rollback last` 精确恢复 v1 字节，`skills uninstall <ids> --yes` 删除部署且中央库保留 2 个版本，backup/doctor 通过；目标目录最终已删除。
+
+**GUI 运行验收**：release `AgentHub.app` 在隔离 home（`/tmp/agenthub-gui/home`）下打开，Dashboard 显示真实数据（Agent 6/9、技能 1、安装 2、MCP 1、插件 1、待更新 1、扫描 7 技能/重复 1/冲突 0/无效 0），onboarding 5 步第 1 步正常，中文界面正常。截图见 [docs/evidence/gui-dashboard.png](docs/evidence/gui-dashboard.png)、[docs/evidence/gui-onboarding.png](docs/evidence/gui-onboarding.png)。
+
+**打开已安装的 AgentHub**
+
+```bash
+open /Applications/AgentHub.app
+```
+
+用隔离 home 启动（不读写真实 Agent 目录）：
+
+```bash
+AGENTHUB_HOME=/tmp/agenthub-gui/home \
+  /Applications/AgentHub.app/Contents/MacOS/agenthub
+```
+
+> 构建：完整 `pnpm tauri build` 已通过，产物 `target/release/bundle/macos/AgentHub.app`（7.14 MiB）与 `target/release/bundle/dmg/AgentHub_0.1.0_aarch64.dmg`（3.77 MiB，2026-10-20 15:59）；`/Applications/AgentHub.app` 已用该构建覆盖安装。首次 DMG 尝试因沙箱 hdiutil 权限失败，随后在用户授权的完整权限下成功；签名/公证尚未配置。完整报告：[docs/ACCEPTANCE-REPORT.md](docs/ACCEPTANCE-REPORT.md)。
 
 ## 核心原则
 
@@ -52,7 +74,7 @@ AgentHub 是 **本地优先** 的 macOS 桌面应用（Tauri 2 + Vue 3 + Rust + 
 
 状态：✅ 已实现（代码可证）/ 🟡 部分或未验证 / ⛔ 未实现 / ⚠️ 已知缺陷。
 
-### Phase 1 — 本机能力管理（核心已完成，收尾中）
+### Phase 1 — 本机能力管理（✅ 已验收）
 
 | 能力 | 状态 | 说明 |
 |---|---|---|
@@ -64,10 +86,11 @@ AgentHub 是 **本地优先** 的 macOS 桌面应用（Tauri 2 + Vue 3 + Rust + 
 | 更新检测 / 漂移 / 缺失检测 | ✅ | Dashboard 与 `check_changes` |
 | 操作级回滚 | ✅ | 每个操作最多一次；拒绝覆盖外部修改 |
 | CLI | ✅ | 计划门禁、`--json`、退出码 0/1/2 |
-| 集成测试 | ✅ | core 21/21、CLI 9/9、前端 21/21 通过（2026-10-20 15:32 实测） |
-| GUI | 🟡 | 10 条路由 + 11 个视图 + 17 组件已实现，`pnpm build` 通过；运行时未验收 |
+| 集成测试 | ✅ | core 21/21、CLI 9/9、前端 21/21 通过（2026-10-20 15:56 实测）；Rust 自动化测试共 30 |
+| GUI | ✅ | 10 条路由 + 11 个视图 + 17 组件；`pnpm build` 通过；隔离 home 人工运行验收 |
+| 真实 Mac 验收 | ✅ | 导入/分发/扫描/更新/回滚/卸载/备份/doctor；见 ACCEPTANCE-REPORT |
 
-### Phase 2 — MCP（代码完成，正常路径有缺陷）
+### Phase 2 — MCP（✅ 核心完成；headers 待加固）
 
 | 能力 | 状态 | 说明 |
 |---|---|---|
@@ -75,10 +98,12 @@ AgentHub 是 **本地优先** 的 macOS 桌面应用（Tauri 2 + Vue 3 + Rust + 
 | 从 Agent 配置只读发现 | ✅ | `json:mcpServers`、`json:mcp.servers`、`toml:mcp_servers` |
 | Keychain 存 env 值 | ✅ | service `com.agenthub.mcp`；缺值 → blocked |
 | 多格式写回 + 保真 | ✅ | TOML 保留注释/其他表；JSON 保留未知键（格式会重排） |
-| 分发 / 移除 / 回滚 | ✅ | 正常路径已可用；已有配置文件时按条目 hash 检测，无需 `--force` |
+| 分发 / 移除 / 回滚 | ✅ | 正常路径可用；条目级 preflight，无需 `--force`；MCP 回滚由 harness 验证 |
+| 计划不含 env 明文 | ✅ | plan payload 剥离 env，执行时从 Keychain 重建 |
+| headers 凭据化 | ⛔ | 仍明文入库/入配置（UI 有警示） |
 | DSH Cordis YAML / TRAE 全局 / ZCode 原生项目配置 | ⛔ | 未声明 codec |
 
-### Phase 3 — 工作流与可视化（部分）
+### Phase 3 — 工作流与可视化（✅ 人工验收）
 
 | 能力 | 状态 | 说明 |
 |---|---|---|
@@ -88,7 +113,9 @@ AgentHub 是 **本地优先** 的 macOS 桌面应用（Tauri 2 + Vue 3 + Rust + 
 | 活动与诊断（4 Tab） | ✅ | 操作/快照/备份/诊断与变更 |
 | Onboarding 5 步 | ✅ | 隐私 → 库 → Agent → 扫描 → 完成 |
 | 启动自动扫描 | 🟡 | UI 会按设置调用 scan；核心 `open()` 本身不扫描 |
-| 结构化日志 / 备份恢复 | ⛔ | `logs/` 空；备份只能创建/列出 |
+| 结构化日志 | ✅ | `logs/operations.log` JSONL（import/start/finish/failed） |
+| 备份恢复 | ⛔ | 备份只能创建/列出；无恢复路径 |
+| GUI 运行验收 | ✅ | Dashboard/onboarding/中文界面/活动历史；截图见 docs/evidence |
 
 > 详细页面规格见 [docs/UI-SPEC.md](docs/UI-SPEC.md)，阶段路线见 [docs/ROADMAP.md](docs/ROADMAP.md)。
 
@@ -164,7 +191,7 @@ source scripts/cargo-env.sh
 pnpm tauri build
 ```
 
-> **当前快照的构建状态**：`pnpm build` 已通过（`vue-tsc --noEmit` + Vite，dist 生成）；`pnpm tauri build` 依赖 Rust 打包与签名环境，本快照未执行验证。
+> **当前快照的构建状态**：`pnpm build` 已通过（`vue-tsc --noEmit` + Vite，dist 生成）；完整 `pnpm tauri build` 已通过并产出 `AgentHub.app`（7.14 MiB）与 `AgentHub_0.1.0_aarch64.dmg`（3.77 MiB，15:59），`/Applications/AgentHub.app` 已覆盖安装；首次 DMG 尝试因沙箱 hdiutil 权限失败，完整权限重跑成功。签名/公证未做。
 
 ### 5. 只构建 CLI
 
@@ -205,8 +232,13 @@ $BIN skills install <skill-id-or-slug> --agents codex,workbuddy --dry-run
 $BIN skills install <skill-id-or-slug> --agents codex,workbuddy --yes
 
 # 更新/漂移检查：生成计划（不写）
+# 注意：仅有更新时 --dry-run 退出码 0；drift/missing/blocked/conflict 才 2
 $BIN skills sync --dry-run
 $BIN skills sync --yes
+
+# 卸载：按 installation id（来自 skills list --json 的 installations[].id）
+$BIN skills uninstall <installation-id> [<installation-id> ...] --dry-run
+$BIN skills uninstall <installation-id> [<installation-id> ...] --yes
 
 # 回滚最近一次可回滚操作（或指定 operation id）
 $BIN skills rollback last
@@ -218,7 +250,7 @@ $BIN profiles list
 $BIN backup create
 $BIN backups list
 
-# MCP：列出、发现、分发（CLI 没有「创建 MCP 定义」命令）
+# MCP：列出、发现、分发（CLI 没有「创建 MCP 定义」命令；env 值不会进入 plan）
 $BIN mcp list
 $BIN mcp discover --agent codex
 $BIN mcp distribute <server-id-or-name> --agents codex --dry-run
@@ -252,7 +284,8 @@ $BIN --home "$AGENTHUB_HOME" doctor
 │   ├── agenthub.db              # VACUUM INTO 的一致性数据库副本
 │   └── manifest.json
 ├── staging/                     # 导入/解压临时目录（自动清理）
-└── logs/                        # 预留；当前没有写入方
+└── logs/
+    └── operations.log           # JSONL 审计：import / operation.start/finish/failed
 ```
 
 | 设置/变量 | 作用 |
@@ -274,14 +307,14 @@ $BIN --home "$AGENTHUB_HOME" doctor
 - **写入前预览**：GUI 弹计划、CLI 默认只打印计划；目标、动作、哈希、警告、重启提示全部可见。
 - **快照与回滚**：每次写入前快照；失败自动逆序恢复；操作级回滚需显式确认。
 - **不可信输入**：zip 拒绝路径穿越/绝对路径/symlink 条目/超限；Git 只浅克隆、不执行仓库脚本、删除 `.git`；Markdown 渲染不使用 `v-html`。
-- **凭据**：MCP env 值存 Keychain，数据库只存 key 名；UI/日志原则是不显示值。
+- **凭据**：MCP env 值存 Keychain，数据库只存 key 名；**分发计划 payload 已剥离 env 值**，执行时才从 Keychain 重建；`logs/operations.log` 只记 id/路径/hash，不记 secret。
 - **已知风险（必须在 UI/使用中留意）**：
   1. MCP headers 当前**明文**入库并写入 Agent 配置；
-  2. 分发计划 JSON 可能包含从 Keychain 取出的 env 值（SQLite 明文）；
-  3. `/usr/bin/security ... -w <value>` 会让 secret 短暂出现在进程参数；
-  4. 快照/备份是含配置文件的普通副本，可能包含 token，且未加密；
-  5. 应用**不是 App Sandbox**、未签名/未公证，以当前用户权限运行；
-  6. Claude Code / Cursor 标为 `VerificationRequired` 但仍允许写入，使用前请自行确认。
+  2. `/usr/bin/security ... -w <value>` 会让 secret 短暂出现在进程参数；
+  3. 快照/备份是含配置文件的普通副本，可能包含 token，且未加密；
+  4. 应用**不是 App Sandbox**、未签名/未公证，以当前用户权限运行；
+  5. Claude Code / Cursor 标为 `VerificationRequired` 但仍允许写入，使用前请自行确认；
+  6. 备份恢复未实现。
 
 完整威胁模型与控制见 [docs/SECURITY.md](docs/SECURITY.md)。
 
@@ -291,12 +324,13 @@ $BIN --home "$AGENTHUB_HOME" doctor
 
 | 类别 | 限制 |
 |---|---|
-| GUI | 页面已构建，但未做运行时端到端验收；浏览器环境只能显示「请运行 pnpm tauri dev」 |
-| 测试 | Tauri 无自动化测试；GUI 运行时未验收；核心缺纯函数单元测试 |
-| MCP | DSH Cordis YAML、TRAE 全局、ZCode 原生项目配置未实现；删除后会留下空表/空对象 |
-| MCP 敏感数据 | env 值进入 `operations.plan`；headers 明文；详见 SECURITY |
+| GUI | 已人工运行验收；无 Tauri 自动化回归；浏览器环境只能显示「请运行 pnpm tauri dev」 |
+| 打包/签名 | DMG 已产出（`AgentHub_0.1.0_aarch64.dmg`）；未签名/未公证 |
+| 测试 | 无 `src-tauri` 自动化测试；核心缺纯函数单元测试 |
+| MCP | DSH Cordis YAML、TRAE 全局、ZCode 原生项目配置未实现；删除后留空表/空对象；headers 明文 |
 | 能力范围 | 插件只读；不执行 skill 脚本；不试连 MCP；不提供市场/云同步/调用统计 |
-| 记录 | 导入与扫描不写 `operations`；无结构化日志；备份无恢复路径 |
+| 记录 | 扫描不写 `operations`（导入已写）；无通用 tracing 日志；备份无恢复路径 |
+| Scope | `installations.scope` 记录 global/custom；项目级安装仍按 custom root 处理 |
 | Adapter | Codex 项目级根、Trae CN 项目根、ZCode 远程传输、WorkBuddy `staticHeaders` 等仍未验证；ChatGPT 只读；同名 app 未按 `CFBundleName` 区分 |
 | 平台 | 仅 macOS Apple Silicon；Windows/Linux 未验证 |
 | 回滚 | 若目标在操作后被外部修改，回滚会拒绝覆盖该项并返回 `partial` |
@@ -334,6 +368,21 @@ $BIN --home "$AGENTHUB_HOME" doctor
 - `find_app` 固定先查 `/Applications`，即使使用 `--home` 也会检测到本机真实 app。
 - 这是预期行为；测试/演示时用 `--agents` 显式指定目标，或先只跑 `--dry-run`。
 
+### DMG 打包（已成功；首次沙箱尝试失败）
+
+- 本机完整构建已产出 `target/release/bundle/dmg/AgentHub_0.1.0_aarch64.dmg`（3.77 MiB，2026-10-20 15:59）与 `target/release/bundle/macos/AgentHub.app`（7.14 MiB），并已覆盖安装 `/Applications/AgentHub.app`。
+- 首次 DMG 尝试在受限沙箱内因 hdiutil 权限失败（当时目录中只有 `bundle_dmg.sh`）；随后在用户授权的完整权限下重跑成功。若在受限环境复现失败，请在普通桌面会话/有权限终端重跑 `source scripts/cargo-env.sh && pnpm tauri build`，这不是应用代码错误。
+- 尚未做 Developer ID 签名与 notarization。
+
+### 打开已安装的 AgentHub.app
+
+```bash
+open /Applications/AgentHub.app
+```
+
+- 若 Gatekeeper 提示未验证开发者：当前未签名/未公证，需在「系统设置 → 隐私与安全性」中允许，或自行签名后再分发。
+- 隔离测试：`AGENTHUB_HOME=/tmp/agenthub-gui/home /Applications/AgentHub.app/Contents/MacOS/agenthub`。
+
 ### 数据库被锁 / 两个实例
 
 - apply/rollback 使用 `<library_root>/.agenthub.lock` 跨进程互斥；SQLite 使用 WAL。
@@ -369,9 +418,11 @@ crates/agenthub-core/          # 核心引擎（无 Tauri 依赖）
 crates/agenthub-cli/           # CLI（1324 行薄前端）
   tests/cli.rs                 # 9 个进程级测试
 src-tauri/                     # Tauri 2 命令层（38 个命令）
-src/                           # Vue 3 UI（主体已实现，SettingsView 待补）
-docs/                          # PRD/架构/数据/适配器/安全/UI/测试/路线图/变更
+src/                           # Vue 3 UI（App/router/11 views/17 components）
+docs/                          # PRD/架构/数据/适配器/安全/UI/测试/路线图/变更/验收报告
+docs/evidence/                 # GUI 验收截图（缩略图）
 scripts/cargo.sh|cargo-env.sh  # 固定 rustup stable + /tmp CARGO_HOME
+scripts/real-acceptance.sh     # 真实 Mac 验收脚本（需授权）
 ```
 
 ---
@@ -389,6 +440,8 @@ scripts/cargo.sh|cargo-env.sh  # 固定 rustup stable + /tmp CARGO_HOME
 | [docs/TEST-PLAN.md](docs/TEST-PLAN.md) | 测试分层、隔离要求、场景矩阵、真实结果、人工验收 | ✅ 本次 |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Phase 0–4、验收标准、未来候选、风险登记 | ✅ 本次 |
 | [docs/CHANGELOG.md](docs/CHANGELOG.md) | 0.1.0 Added/Changed/Fixed/Known issues | ✅ 本次 |
+| [docs/ACCEPTANCE-REPORT.md](docs/ACCEPTANCE-REPORT.md) | 真实 Mac 验收 + GUI 运行 + 构建/测试证据 + 未验证项 | ✅ 新增 |
+| [docs/evidence/](docs/evidence/) | GUI 验收截图（Dashboard / Onboarding） | ✅ 新增 |
 | [docs/AGENT-COMPATIBILITY.md](docs/AGENT-COMPATIBILITY.md) | 本机 9 个 Agent 路径/格式/证据矩阵 | 📚 调研同事维护 |
 | [docs/REFERENCE-STUDY.md](docs/REFERENCE-STUDY.md) | Agent Skills / MCP 规范与各 Agent 官方文档研究 | 📚 调研同事维护 |
 | [docs/compat-evidence/](docs/compat-evidence/README.md) | 脱敏证据、symlink 验证方案、交叉核对 | 📚 调研同事维护 |
@@ -398,23 +451,27 @@ scripts/cargo.sh|cargo-env.sh  # 固定 rustup stable + /tmp CARGO_HOME
 ## 测试与验证
 
 ```bash
-# Rust（必须用 wrapper）
-./scripts/cargo.sh test -p agenthub-core
-./scripts/cargo.sh test -p agenthub-cli
+# Rust（必须用 wrapper）；core 21 + CLI 9 = 30
+./scripts/cargo.sh test -p agenthub-core -p agenthub-cli
 
-# 前端（当前无 spec，会 exit 1）
+# 前端：5 文件 / 21 测试
 pnpm test
+
+# 构建
+pnpm build
+pnpm tauri build
 ```
 
-**当前真实结果（2026-10-20 15:32）**：
+**当前真实结果（2026-10-20 15:56）**：
 
-- `agenthub-core`：21 个集成测试，**21 通过 / 0 失败**。
-- `agenthub-cli`：9 个集成测试，**9 通过 / 0 失败**。
+- `./scripts/cargo.sh test -p agenthub-core -p agenthub-cli`：**exit 0**；core 21、CLI 9（共 30）全部通过。
 - `pnpm test`（vitest）：5 个文件 / 21 个测试，**全部通过**。
 - `pnpm build`：**通过**（`vue-tsc --noEmit` + Vite build）。
-- `pnpm tauri build`：本快照未执行（未验证打包/签名）。
+- `pnpm tauri build`（完整构建）：**通过**；产物 `AgentHub.app`（7.14 MiB）与 `AgentHub_0.1.0_aarch64.dmg`（3.77 MiB，15:59）；`/Applications/AgentHub.app` 已覆盖安装。首次 DMG 尝试因沙箱 hdiutil 权限失败，完整权限重跑成功。
+- **真实 Mac 验收**：通过；`skills sync --dry-run` 仅有更新时退出码 0（drift/missing/blocked/conflict 才 2）；回滚精确恢复 v1；卸载后库保留 2 版本；doctor ok。
+- **GUI 运行验收**：隔离 home 通过；截图见 `docs/evidence/`。
 
-> 以上为真实输出摘要；「测试通过」仅指上述命令与快照，不包含 GUI 运行时、真实 Agent 写入或签名打包。修复/剩余项见 [docs/TEST-PLAN.md](docs/TEST-PLAN.md) 与 [docs/ROADMAP.md](docs/ROADMAP.md)。
+> 以上为真实输出摘要；完整证据与残留状态见 [docs/ACCEPTANCE-REPORT.md](docs/ACCEPTANCE-REPORT.md)。「测试通过」不包含签名/公证、GUI 自动化或真实 Keychain 正向写入（DMG 已产出）。
 
 ---
 

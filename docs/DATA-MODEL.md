@@ -273,7 +273,7 @@ erDiagram
 
 唯一索引 `(agent_id, target_path, config_key)` 保证「同一 Agent 的同一文件里的同一 server 名只有一条记录」，从而使 `upsert_installation` 可安全重复执行（幂等）。`ops.rs:556-592` 的 Skill 安装走 `find_installation`（隐含 `config_key=''`），MCP 走 `find_mcp_installation`（显式 key）。
 
-> 已知限制：`installations.scope` 虽是列，但 Skill 实际安装路径由 `pick_install_root` 决定（custom root 优先，其次 adapter 的 `install_roots`），写库时固定为 `Scope::Global`（`ops.rs:575`）；项目级安装尚未实现为独立 scope。
+> `installations.scope` 现在写入规划时的 scope：`pick_install_root` 先 custom root（`custom`）、再 adapter install root（`global`）（`service.rs:1081-1120`）；`ops.rs` 用 `item.scope` 落库（`ops.rs:622`）。项目级安装仍按 custom root 处理，独立 project 流程未实现。
 
 ---
 
