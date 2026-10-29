@@ -47,3 +47,6 @@ coverage/
 /docs/compat-evidence/
 /docs/evidence/
 /docs/handoffs/
+
+# landing 部署工具本地配置
+landing/.openai/
