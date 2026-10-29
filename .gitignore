@@ -55,3 +55,6 @@ coverage/
 # landing 部署工具本地配置
 landing/.openai/
 landing/dist/
+
+# 着陆页本地开发，不随仓库发布
+landing/
