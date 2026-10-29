@@ -40,8 +40,56 @@ fn account(server_id: &str, key: &str) -> String {
     format!("{server_id}/{key}")
 }
 
+/// Quote a value for a single-line `security -i` command read from stdin.
+/// Returns `None` when the value cannot be represented safely on one line
+/// (contains quotes, backslashes or newlines) and must fall back to argv mode.
+fn quote_for_security_i(value: &str) -> Option<String> {
+    if value
+        .chars()
+        .any(|c| matches!(c, '\'' | '"' | '\\' | '\n' | '\r'))
+    {
+        return None;
+    }
+    if value.chars().any(|c| c.is_whitespace()) {
+        Some(format!("'{value}'"))
+    } else {
+        Some(value.to_string())
+    }
+}
+
+/// Store a secret in the macOS Keychain.
+///
+/// The value is passed through `security -i` stdin mode so it never appears in
+/// process arguments (visible via `ps`). Values containing quotes/backslashes/
+/// newlines cannot be tokenized by `security -i` and fall back to the classic
+/// argv form (`-w <value>`), which is the documented residual risk in
+/// docs/SECURITY.md.
 pub fn set_secret(server_id: &str, key: &str, value: &str) -> Result<()> {
     let security = security()?;
+    let account = account(server_id, key);
+    if let Some(quoted) = quote_for_security_i(value) {
+        use std::io::Write as _;
+        let mut child = std::process::Command::new(&security)
+            .arg("-i")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()?;
+        let stdin = child
+            .stdin
+            .as_mut()
+            .ok_or_else(|| Error::msg("could not open stdin for security -i"))?;
+        writeln!(
+            stdin,
+            "add-generic-password -U -s {KEYCHAIN_SERVICE} -a {account} -w {quoted}"
+        )?;
+        drop(child.stdin.take());
+        let status = child.wait()?;
+        if status.success() {
+            return Ok(());
+        }
+        // Fall through to argv mode only if the stdin path was rejected.
+    }
     let status = std::process::Command::new(security)
         .args([
             "add-generic-password",
@@ -49,7 +97,7 @@ pub fn set_secret(server_id: &str, key: &str, value: &str) -> Result<()> {
             "-s",
             KEYCHAIN_SERVICE,
             "-a",
-            &account(server_id, key),
+            &account,
             "-w",
             value,
         ])
@@ -102,6 +150,79 @@ pub fn delete_secret(server_id: &str, key: &str) -> Result<()> {
 
 pub fn secret_present(server_id: &str, key: &str) -> bool {
     get_secret(server_id, key).is_some()
+}
+
+// ---------------------------------------------------------------------------
+// Header secrets (stored in Keychain; the DB keeps header names only)
+// ---------------------------------------------------------------------------
+
+fn header_key(name: &str) -> String {
+    format!("header/{name}")
+}
+
+pub fn set_header_secret(server_id: &str, name: &str, value: &str) -> Result<()> {
+    set_secret(server_id, &header_key(name), value)
+}
+
+pub fn get_header_secret(server_id: &str, name: &str) -> Option<String> {
+    get_secret(server_id, &header_key(name))
+}
+
+pub fn delete_header_secret(server_id: &str, name: &str) -> Result<()> {
+    delete_secret(server_id, &header_key(name))
+}
+
+/// Read all header values for a server from Keychain. Missing values are a
+/// hard block: the entry would be written incomplete.
+fn load_header_values(server: &McpRow) -> Result<BTreeMap<String, String>> {
+    let mut values = BTreeMap::new();
+    for name in server.headers.iter().map(|(name, _)| name) {
+        match get_header_secret(&server.id, name) {
+            Some(value) => {
+                values.insert(name.clone(), value);
+            }
+            None => {
+                return Err(Error::blocked(format!(
+                    "header value '{name}' is not stored in Keychain"
+                )));
+            }
+        }
+    }
+    Ok(values)
+}
+
+/// One-time migration for rows created before headers moved to Keychain: any
+/// non-empty value still stored in the DB row is moved to Keychain and blanked
+/// in place. Returns the number of migrated header values.
+fn migrate_header_secrets(hub: &AgentHub) -> Result<usize> {
+    let mut migrated = 0;
+    for server in hub.db_ref().list_mcp()? {
+        let pending: Vec<(String, String)> = server
+            .headers
+            .iter()
+            .filter(|(_, value)| !value.is_empty())
+            .cloned()
+            .collect();
+        if pending.is_empty() {
+            continue;
+        }
+        // This is a mutation triggered from a read path; it must hold the
+        // cross-process runtime lock like every other write. No-op when the
+        // caller (e.g. mcp_upsert) already holds it on this thread.
+        let _guard = hub.runtime_guard()?;
+        let mut headers = server.headers.clone();
+        for (name, value) in pending {
+            set_header_secret(&server.id, &name, &value)?;
+            if let Some(slot) = headers.iter_mut().find(|(n, _)| n == &name) {
+                slot.1 = String::new();
+            }
+            migrated += 1;
+        }
+        let mut row = server.clone();
+        row.headers = headers;
+        hub.db_ref().upsert_mcp(&row)?;
+    }
+    Ok(migrated)
 }
 
 // ---------------------------------------------------------------------------
@@ -442,7 +563,12 @@ fn type_for(format: &str, transport: McpTransport) -> &'static str {
     }
 }
 
-fn build_entry(row: &McpRow, env_values: &BTreeMap<String, String>, format: &str) -> Result<Value> {
+fn build_entry(
+    row: &McpRow,
+    env_values: &BTreeMap<String, String>,
+    header_values: &BTreeMap<String, String>,
+    format: &str,
+) -> Result<Value> {
     let transport = McpTransport::parse(&row.transport);
     let mut entry = serde_json::Map::new();
     match transport {
@@ -469,9 +595,13 @@ fn build_entry(row: &McpRow, env_values: &BTreeMap<String, String>, format: &str
                 let headers: serde_json::Map<String, Value> = row
                     .headers
                     .iter()
-                    .map(|(key, value)| (key.clone(), json!(value)))
+                    .filter_map(|(key, _)| {
+                        header_values.get(key).map(|value| (key.clone(), json!(value)))
+                    })
                     .collect();
-                entry.insert("headers".to_string(), Value::Object(headers));
+                if !headers.is_empty() {
+                    entry.insert("headers".to_string(), Value::Object(headers));
+                }
             }
         }
     }
@@ -502,6 +632,9 @@ fn agent_map(hub: &AgentHub) -> Result<std::collections::HashMap<String, AgentVi
 }
 
 pub fn list_servers(hub: &AgentHub) -> Result<Vec<McpServerView>> {
+    // Move any pre-Keychain header values still stored in DB rows into the
+    // Keychain (idempotent; no-op when everything is already migrated).
+    migrate_header_secrets(hub)?;
     let rows = hub.db_ref().list_mcp()?;
     let agents = agent_map(hub)?;
     let installations = hub
@@ -546,6 +679,27 @@ pub fn list_servers(hub: &AgentHub) -> Result<Vec<McpServerView>> {
                     missing.join(", ")
                 ));
             }
+        }
+        if !row.headers.is_empty() {
+            let missing: Vec<String> = row
+                .headers
+                .iter()
+                .map(|(name, _)| name)
+                .filter(|name| get_header_secret(&row.id, name).is_none())
+                .cloned()
+                .collect();
+            if !missing.is_empty() {
+                view.issues.push(format!(
+                    "Header values are not stored in Keychain yet: {}",
+                    missing.join(", ")
+                ));
+            }
+            // Values never leave the Keychain: the view carries masked values.
+            view.headers = row
+                .headers
+                .iter()
+                .map(|(name, _)| (name.clone(), "••••••".to_string()))
+                .collect();
         }
         if row.transport == McpTransport::Stdio.as_str()
             && row.command.as_deref().unwrap_or_default().trim().is_empty()
@@ -702,6 +856,21 @@ pub fn upsert(hub: &AgentHub, request: McpUpsertRequest) -> Result<McpServerView
     } else {
         None
     };
+    // Header values go to the Keychain, never into the DB row: the row keeps
+    // only the header names (values blanked). Removed headers lose their
+    // secrets.
+    let server_id_for_headers = id.clone();
+    let header_names: Vec<String> = request.headers.iter().map(|(name, _)| name.clone()).collect();
+    for (hname, hvalue) in &request.headers {
+        set_header_secret(&server_id_for_headers, hname, hvalue)?;
+    }
+    if let Some(existing) = &existing {
+        for (old_name, _) in &existing.headers {
+            if !header_names.contains(old_name) {
+                let _ = delete_header_secret(&existing.id, old_name);
+            }
+        }
+    }
     let now = util::now();
     let row = McpRow {
         id,
@@ -711,7 +880,10 @@ pub fn upsert(hub: &AgentHub, request: McpUpsertRequest) -> Result<McpServerView
         command: request.command,
         args: request.args,
         url: request.url,
-        headers: request.headers.into_iter().collect(),
+        headers: header_names
+            .into_iter()
+            .map(|name| (name, String::new()))
+            .collect(),
         env_keys: request.env_keys,
         credential_refs: request.credential_refs,
         capability_id: None,
@@ -764,6 +936,7 @@ pub fn import(hub: &AgentHub, request: McpImportRequest) -> Result<McpServerView
         let canonical_existing = entry_hash(&build_entry(
             existing,
             &BTreeMap::new(),
+            &BTreeMap::new(),
             target.format,
         )?);
         if canonical_existing == entry_hash(&entry) {
@@ -777,16 +950,25 @@ pub fn import(hub: &AgentHub, request: McpImportRequest) -> Result<McpServerView
             request.name
         )));
     }
+    // Imported header values go straight to the Keychain; the DB row keeps
+    // only the header names.
+    let imported_id = util::new_id();
+    for (hname, hvalue) in &headers {
+        set_header_secret(&imported_id, hname, hvalue)?;
+    }
     let now = util::now();
     let row = McpRow {
-        id: util::new_id(),
+        id: imported_id,
         name: request.name.clone(),
         description: format!("Imported from {}", agent.name),
         transport: transport.as_str().to_string(),
         command: entry.get("command").and_then(Value::as_str).map(str::to_string),
         args: entry_strings(&entry, "args"),
         url: entry.get("url").and_then(Value::as_str).map(str::to_string),
-        headers: headers.into_iter().collect(),
+        headers: headers
+            .into_keys()
+            .map(|name| (name, String::new()))
+            .collect(),
         env_keys,
         credential_refs: Vec::new(),
         capability_id: None,
@@ -834,6 +1016,19 @@ pub fn plan_distribute(hub: &AgentHub, request: McpDistributeRequest) -> Result<
             }
         }
     }
+    let mut header_values: BTreeMap<String, String> = BTreeMap::new();
+    for name in server.headers.iter().map(|(name, _)| name) {
+        match get_header_secret(&server.id, name) {
+            Some(value) => {
+                header_values.insert(name.clone(), value);
+            }
+            None => {
+                warnings.push(format!(
+                    "Header value '{name}' is missing from Keychain; distribution is blocked for agents that need it."
+                ));
+            }
+        }
+    }
     let secrets_ready = warnings.is_empty();
 
     for agent_id in &request.agent_ids {
@@ -876,14 +1071,15 @@ pub fn plan_distribute(hub: &AgentHub, request: McpDistributeRequest) -> Result<
             items.push(mcp_blocked_item(
                 &server,
                 agent,
-                "Required environment values are not stored in Keychain yet.".to_string(),
+                "Required environment/header values are not stored in Keychain yet.".to_string(),
             ));
             continue;
         }
-        let full_entry = build_entry(&server, &env_values, target.format)?;
+        let full_entry = build_entry(&server, &env_values, &header_values, target.format)?;
         // The persisted plan must never contain secret values: strip the env
-        // block from the payload; the executor rebuilds it from Keychain.
-        let plan_entry = build_entry(&server, &BTreeMap::new(), target.format)?;
+        // block and header values from the payload; the executor rebuilds both
+        // from Keychain.
+        let plan_entry = build_entry(&server, &BTreeMap::new(), &BTreeMap::new(), target.format)?;
         if entry_hash(&full_entry) == entry_hash(&json!({})) {
             items.push(mcp_blocked_item(&server, agent, "MCP server definition is empty.".to_string()));
             continue;
@@ -928,9 +1124,9 @@ pub fn plan_distribute(hub: &AgentHub, request: McpDistributeRequest) -> Result<
             restarts.push(format!("{}: {}", agent.name, note));
         }
         let mut item_warnings = Vec::new();
-        if !server.env_keys.is_empty() {
+        if !server.env_keys.is_empty() || !server.headers.is_empty() {
             item_warnings.push(
-                "Environment values from Keychain will be written into the agent's config file. This exposes them to anything that can read that file."
+                "Environment/header values from Keychain will be written into the agent's config file. This exposes them to anything that can read that file."
                     .to_string(),
             );
         }
@@ -1118,8 +1314,10 @@ pub fn apply_config_item(db: &Database, item: &PlanItem, remove: bool) -> Result
         env_values.insert(env_key.clone(), value);
     }
     // Rebuild the entry with secret values at apply time only, so secrets are
-    // never persisted inside operations.plan or logs.
-    let entry = build_entry(&server, &env_values, format)?;
+    // never persisted inside operations.plan or logs. Header values come from
+    // Keychain as well.
+    let header_values = load_header_values(&server)?;
+    let entry = build_entry(&server, &env_values, &header_values, format)?;
     let mut entries = read_entries(&target_path, format)?;
     entries.retain(|(name, _)| name != key);
     entries.push((key.to_string(), entry.clone()));

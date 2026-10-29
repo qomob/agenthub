@@ -20,6 +20,29 @@ use crate::util;
 
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+thread_local! {
+    /// Depth of runtime-lock leases on the current thread. GUI and CLI both
+    /// funnel every operation through one `AgentHub` behind a mutex, so
+    /// operations on one thread never overlap; the counter lets already-locked
+    /// entry points call other locking helpers (e.g. `sync_agents`) without
+    /// re-acquiring the flock. A counter (not a bool) is required because
+    /// nested leases drop in inner-first order.
+    static RUNTIME_HELD: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Owns the runtime lock for one mutating operation. Dropping it releases the
+/// flock (if this thread acquired it) and clears the thread-local flag.
+pub(crate) struct RuntimeLease {
+    guard: Option<crate::runtime::RuntimeGuard>,
+}
+
+impl Drop for RuntimeLease {
+    fn drop(&mut self) {
+        drop(self.guard.take());
+        RUNTIME_HELD.with(|held| held.set(held.get().saturating_sub(1)));
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CoreConfig {
     /// The user's home directory (or a test fixture home).
@@ -133,6 +156,11 @@ impl AgentHub {
 
     pub fn sync_agents(&self) -> Result<()> {
         let home = &self.config.home;
+        // Change detection first: in steady state this is a pure read and
+        // must not take the runtime lock (read paths such as `list_agents`
+        // call this on every refresh). Only an actual change upgrades the
+        // call into a locked mutation.
+        let mut pending: Vec<(Box<dyn AgentAdapter>, AgentRecord, AgentStatus)> = Vec::new();
         for adapter in all_adapters() {
             let detection = adapter.detect(home);
             let existing = self.db.get_agent_by_key(adapter.key())?;
@@ -165,10 +193,42 @@ impl AgentHub {
                     .unwrap_or_else(|| now.clone()),
                 updated_at: now,
             };
+            let changed = existing.as_ref().is_none_or(|row| {
+                row.app_path != record.app_path
+                    || row.home_path != record.home_path
+                    || row.notes != record.notes
+                    || row.name != record.name
+                    || row.vendor != record.vendor
+                    || row.adapter_id != record.adapter_id
+            });
+            if changed {
+                pending.push((adapter, record, detection.status));
+            }
+        }
+        if pending.is_empty() {
+            return Ok(());
+        }
+        let _runtime = self.runtime_guard()?;
+        for (adapter, record, status) in pending {
             self.db.upsert_agent(&record)?;
-            self.seed_agent_evidence(&*adapter, &record, detection.status)?;
+            self.seed_agent_evidence(&*adapter, &record, status)?;
         }
         Ok(())
+    }
+
+    /// Acquire the cross-process runtime lock for one mutating operation.
+    /// Re-entrant per thread via [`RUNTIME_HELD`]; read-only paths must not
+    /// call this.
+    pub(crate) fn runtime_guard(&self) -> Result<RuntimeLease> {
+        if RUNTIME_HELD.with(std::cell::Cell::get) > 0 {
+            RUNTIME_HELD.with(|held| held.set(held.get() + 1));
+            return Ok(RuntimeLease { guard: None });
+        }
+        let guard = crate::runtime::acquire(&self.config.data_dir, crate::runtime::RuntimeKind::detect())?;
+        RUNTIME_HELD.with(|held| held.set(held.get() + 1));
+        Ok(RuntimeLease {
+            guard: Some(guard),
+        })
     }
 
     /// Record conservative per-feature evidence for an agent. Read-side facts
@@ -281,6 +341,7 @@ impl AgentHub {
     /// current content still matches what this operation wrote.
     pub fn recover_operation(&self, operation_id: &str) -> Result<RecoveryReport> {
         let _guard = self.write_lock.lock().map_err(|_| Error::msg("lock poisoned"))?;
+        let _runtime = self.runtime_guard()?;
         let executor = Executor {
             db: &self.db,
             library: &self.library()?,
@@ -372,6 +433,7 @@ impl AgentHub {
 
     pub fn update_agent_paths(&self, update: AgentPathUpdate) -> Result<AgentView> {
         let _guard = self.write_lock.lock().map_err(|_| Error::msg("lock poisoned"))?;
+        let _runtime = self.runtime_guard()?;
         let row = self
             .db
             .get_agent(&update.agent_id)?
@@ -414,6 +476,7 @@ impl AgentHub {
     }
 
     pub fn set_project_roots(&self, roots: Vec<String>) -> Result<Vec<String>> {
+        let _runtime = self.runtime_guard()?;
         let mut valid = Vec::new();
         for root in roots {
             let path = PathBuf::from(&root);
@@ -479,6 +542,7 @@ impl AgentHub {
 
     pub fn update_settings(&self, update: SettingsUpdate) -> Result<AppSettings> {
         let _guard = self.write_lock.lock().map_err(|_| Error::msg("lock poisoned"))?;
+        let _runtime = self.runtime_guard()?;
         if let Some(root) = &update.library_root {
             self.change_library_root(Path::new(root))?;
         }
@@ -505,6 +569,7 @@ impl AgentHub {
     }
 
     pub fn mark_initialized(&self) -> Result<AppSettings> {
+        let _runtime = self.runtime_guard()?;
         self.db.set_setting("initialized", "true")?;
         self.settings()
     }
@@ -522,16 +587,26 @@ impl AgentHub {
         library::validate_new_root(new_root)?;
         let new_library = Library::new(new_root);
         new_library.init()?;
+        // `validate_new_root` guarantees the new root is empty before we touch
+        // it, so any failure below can safely roll back by removing what we
+        // created there — a half-copied library must not survive as a silent
+        // orphan (and would also make retrying the same path fail the
+        // "directory must be empty" check).
+        let rollback_new_root = |err: crate::error::Error| -> crate::error::Error {
+            let _ = fs::remove_dir_all(new_root);
+            err
+        };
         if current.exists() {
             let has_content = fs::read_dir(&current)
                 .map(|mut entries| entries.next().is_some())
                 .unwrap_or(false);
             if has_content {
-                util::copy_dir(&current, new_root)?;
+                util::copy_dir(&current, new_root).map_err(rollback_new_root)?;
             }
         }
         self.db
-            .set_setting("library_root", &new_root.to_string_lossy())?;
+            .set_setting("library_root", &new_root.to_string_lossy())
+            .map_err(rollback_new_root)?;
         Ok(())
     }
 
@@ -734,6 +809,7 @@ impl AgentHub {
 
     pub fn import_skill(&self, request: ImportRequest) -> Result<ImportResult> {
         let _guard = self.write_lock.lock().map_err(|_| Error::msg("lock poisoned"))?;
+        let _runtime = self.runtime_guard()?;
         let library = self.library()?;
         library.init()?;
         let staging = StagingDir::create(&library.staging_root())?;
@@ -998,6 +1074,7 @@ impl AgentHub {
     /// caller explicitly opts in, because importing hundreds of marketplace
     /// entries is rarely what the user wants.
     pub fn import_scan_skills(&self, request: ScanImportRequest) -> Result<ScanImportResult> {
+        let _runtime = self.runtime_guard()?;
         self.sync_agents()?;
         let agents = self.db.list_agents()?;
         let mut candidates: Vec<(AgentRow, DiscoveredSkill)> = Vec::new();
@@ -1572,6 +1649,7 @@ impl AgentHub {
         restarts: Vec<String>,
         force: bool,
     ) -> Result<OperationPlan> {
+        let _runtime = self.runtime_guard()?;
         let operation_id = util::new_id();
         let summary_counts = plan_summary(&items);
         let plan_created_at = util::now();
@@ -1767,6 +1845,8 @@ impl AgentHub {
         idempotency_key: Option<&str>,
     ) -> Result<OperationResult> {
         let _guard = self.write_lock.lock().map_err(|_| Error::msg("lock poisoned"))?;
+        let _runtime =
+            crate::runtime::acquire(&self.config.data_dir, crate::runtime::RuntimeKind::detect())?;
         self.apply_operation_approved_locked(operation_id, approval_token, idempotency_key, false)
     }
 
@@ -1854,6 +1934,8 @@ impl AgentHub {
     /// `approve_operation` + `apply_operation_approved`.
     pub fn apply_operation(&self, operation_id: &str, force: bool) -> Result<OperationResult> {
         let _guard = self.write_lock.lock().map_err(|_| Error::msg("lock poisoned"))?;
+        let _runtime =
+            crate::runtime::acquire(&self.config.data_dir, crate::runtime::RuntimeKind::detect())?;
         let row = self
             .db
             .get_operation(operation_id)?
@@ -1889,6 +1971,8 @@ impl AgentHub {
 
     pub fn rollback_operation(&self, operation_id: &str) -> Result<OperationResult> {
         let _guard = self.write_lock.lock().map_err(|_| Error::msg("lock poisoned"))?;
+        let _runtime =
+            crate::runtime::acquire(&self.config.data_dir, crate::runtime::RuntimeKind::detect())?;
         let executor = Executor {
             db: &self.db,
             library: &self.library()?,
@@ -1924,11 +2008,125 @@ impl AgentHub {
 
     pub fn create_backup(&self) -> Result<BackupResult> {
         let _guard = self.write_lock.lock().map_err(|_| Error::msg("lock poisoned"))?;
+        let _runtime =
+            crate::runtime::acquire(&self.config.data_dir, crate::runtime::RuntimeKind::detect())?;
         self.library()?.create_backup(&self.db, APP_VERSION)
     }
 
     pub fn list_backups(&self) -> Result<Vec<BackupView>> {
         self.library()?.list_backups()
+    }
+
+    /// Restore the metadata database from a validated backup.
+    ///
+    /// Safety sequence:
+    /// 1. validate the backup id/path, manifest and (when present) SHA-256;
+    /// 2. open the backup read-only and run `integrity_check` before touching
+    ///    the live database;
+    /// 3. create a fresh safety backup of the current state;
+    /// 4. atomically replace the DB file (dropping the live connection first)
+    ///    and remove stale WAL/SHM files;
+    /// 5. verify the restored database; on any failure restore the safety copy
+    ///    and return an error.
+    pub fn restore_backup(&mut self, backup_id: &str) -> Result<RestoreResult> {
+        let _guard = self.write_lock.lock().map_err(|_| Error::msg("lock poisoned"))?;
+        let _runtime =
+            crate::runtime::acquire(&self.config.data_dir, crate::runtime::RuntimeKind::detect())?;
+        if !backup_id.starts_with("backup-")
+            || backup_id.contains('/')
+            || backup_id.contains('\\')
+            || backup_id.contains("..")
+        {
+            return Err(Error::invalid("invalid backup id"));
+        }
+        let library = self.library()?;
+        let backup_dir = library.backups_dir().join(backup_id);
+        let source_db = backup_dir.join("agenthub.db");
+        if !source_db.is_file() {
+            return Err(Error::not_found(format!(
+                "backup {backup_id} does not exist"
+            )));
+        }
+        let manifest_text = fs::read_to_string(backup_dir.join("manifest.json"))
+            .map_err(|err| Error::msg(format!("backup manifest is unreadable: {err}")))?;
+        let manifest: library::BackupManifest = serde_json::from_str(&manifest_text)
+            .map_err(|err| Error::msg(format!("backup manifest is invalid: {err}")))?;
+        if manifest.id != backup_id {
+            return Err(Error::conflict("backup manifest id does not match its directory"));
+        }
+        if let Some(expected) = &manifest.database_sha256 {
+            let actual = util::hash_file(&source_db)?;
+            if &actual != expected {
+                return Err(Error::Verification(
+                    "backup checksum mismatch; refusing to restore".to_string(),
+                ));
+            }
+        }
+        {
+            let probe = crate::db::Database::open(&source_db)?;
+            let report = probe.integrity_check()?;
+            drop(probe);
+            if !report.ok {
+                return Err(Error::Verification(format!(
+                    "backup integrity check failed: {}",
+                    report.details.join("; ")
+                )));
+            }
+        }
+
+        let safety = library.create_backup(&self.db, APP_VERSION)?;
+        let db_path = self.config.db_path.clone();
+        let safety_db = PathBuf::from(&safety.path).join("agenthub.db");
+        let temporary = db_path.with_file_name(format!(".agenthub-restore-{}.db", util::new_id()));
+
+        // Close the live connection before replacing the file.
+        let old = std::mem::replace(&mut self.db, crate::db::Database::open_in_memory()?);
+        drop(old);
+        remove_sqlite_sidecars(&db_path);
+
+        if let Err(err) = fs::copy(&source_db, &temporary) {
+            self.db = crate::db::Database::open(&db_path)?;
+            return Err(Error::msg(format!("cannot stage restored database: {err}")));
+        }
+        if let Err(err) = fs::rename(&temporary, &db_path) {
+            let _ = fs::remove_file(&temporary);
+            self.db = crate::db::Database::open(&db_path)?;
+            return Err(Error::msg(format!("cannot replace database: {err}")));
+        }
+
+        let restored = match crate::db::Database::open(&db_path) {
+            Ok(db) => {
+                self.db = db;
+                match self.db.integrity_check() {
+                    Ok(report) if report.ok => Some(report),
+                    Ok(report) => {
+                        let _ = report;
+                        None
+                    }
+                    Err(_) => None,
+                }
+            }
+            Err(_) => None,
+        };
+        let Some(report) = restored else {
+            // Roll back to the safety copy and reopen it.
+            remove_sqlite_sidecars(&db_path);
+            let _ = fs::copy(&safety_db, &db_path);
+            self.db = crate::db::Database::open(&db_path)?;
+            return Err(Error::Verification(format!(
+                "restored database failed validation; previous state kept in safety backup {}",
+                safety.id
+            )));
+        };
+        let capability_count = self.db.count_capabilities("skill")?;
+        Ok(RestoreResult {
+            backup_id: backup_id.to_string(),
+            restored_at: util::now(),
+            safety_backup_id: safety.id,
+            schema_version: report.schema_version,
+            integrity_ok: report.ok,
+            capability_count,
+        })
     }
 
     // -- change detection --------------------------------------------------
@@ -2085,6 +2283,55 @@ impl AgentHub {
         })
     }
 
+    /// Bundle a secret-free diagnostics report (doctor checks, agent list,
+    /// masked MCP servers, dashboard stats) into a single JSON file for user
+    /// initiated bug reports. Never includes settings, env/header values,
+    /// tokens or skill file contents.
+    pub fn export_diagnostics(&self, out_path: &Path) -> Result<DiagnosticsExport> {
+        let home = self.config.home.to_string_lossy().to_string();
+        let doctor = self.doctor()?;
+        let agents = self.list_agents()?;
+        let mut mcp_servers = crate::mcp::list_servers(self)?;
+        // URL query strings and stdio argv can carry credentials that never
+        // touch the secret store (e.g. `?token=...`, `--api-key <value>`).
+        // Strip them here so the export keeps its "no secrets" promise.
+        for server in &mut mcp_servers {
+            if let Some(url) = &server.url {
+                server.url = Some(crate::redact::redact_url(url));
+            }
+            server.args = crate::redact::redact_args(&server.args);
+        }
+        let dashboard = self.dashboard()?;
+        let skills = self.list_skills()?;
+        let generated_at = util::now();
+        let mut report = serde_json::json!({
+            "kind": "agenthub-diagnostics",
+            "appVersion": APP_VERSION,
+            "generatedAt": generated_at,
+            "doctor": doctor,
+            "agents": agents,
+            "mcpServers": mcp_servers,
+            "dashboard": dashboard,
+            "skillSummary": {
+                "total": skills.len(),
+            },
+        });
+        // Fold the home directory prefix everywhere (doctor details, skill
+        // roots, distribution target paths) so the report does not disclose
+        // the local username or directory layout.
+        fold_home_paths(&mut report, &home);
+        let bytes = serde_json::to_vec_pretty(&report)?;
+        if let Some(parent) = out_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(out_path, &bytes)?;
+        Ok(DiagnosticsExport {
+            path: out_path.to_path_buf(),
+            bytes: bytes.len(),
+            generated_at,
+        })
+    }
+
     pub fn doctor(&self) -> Result<DoctorReport> {
         let mut checks = Vec::new();
         let library = self.library()?;
@@ -2191,6 +2438,7 @@ impl AgentHub {
     // -- plugins (read-only registry) --------------------------------------
 
     pub fn sync_plugins(&self) -> Result<Vec<PluginRecordView>> {
+        let _runtime = self.runtime_guard()?;
         self.sync_agents()?;
         for row in self.db.list_agents()? {
             let Some(adapter) = find_adapter(&row.adapter_id) else {
@@ -2297,8 +2545,19 @@ impl AgentHub {
 
     pub fn upsert_profile(&self, request: ProfileUpsertRequest) -> Result<ProfileView> {
         let _guard = self.write_lock.lock().map_err(|_| Error::msg("lock poisoned"))?;
+        let _runtime = self.runtime_guard()?;
         if request.name.trim().is_empty() {
             return Err(Error::msg("profile name cannot be empty"));
+        }
+        // Validate every item capability BEFORE touching stored state: the
+        // update must be all-or-nothing (no partially saved profile when an
+        // item references a capability that no longer exists).
+        for item in &request.items {
+            let capability = self
+                .db
+                .get_capability(&item.capability_id)?
+                .ok_or_else(|| Error::not_found("profile item capability is missing"))?;
+            let _ = capability;
         }
         let now = util::now();
         let id = match &request.id {
@@ -2313,13 +2572,13 @@ impl AgentHub {
                 id
             }
         };
+        // Replace the item set inside one transaction so a failure part-way
+        // through cannot leave the profile with a half-deleted item list.
+        // `unchecked_transaction` opens BEGIN on the shared connection, so the
+        // `self.db.*` writes below all join it until `commit`.
+        let tx = self.db.conn().unchecked_transaction()?;
         self.db.delete_profile_items(&id)?;
         for item in &request.items {
-            let capability = self
-                .db
-                .get_capability(&item.capability_id)?
-                .ok_or_else(|| Error::not_found("profile item capability is missing"))?;
-            let _ = capability;
             self.db.add_profile_item(
                 &id,
                 &item.capability_id,
@@ -2327,6 +2586,7 @@ impl AgentHub {
                 &item.target_agent_keys,
             )?;
         }
+        tx.commit()?;
         self.list_profiles()?
             .into_iter()
             .find(|profile| profile.id == id)
@@ -2334,6 +2594,7 @@ impl AgentHub {
     }
 
     pub fn delete_profile(&self, id: &str) -> Result<()> {
+        let _runtime = self.runtime_guard()?;
         self.db.delete_profile(id)
     }
 
@@ -2587,6 +2848,7 @@ impl AgentHub {
     }
 
     pub fn record_validation(&self, request: ValidationRequest) -> Result<ValidationRun> {
+        let _runtime = self.runtime_guard()?;
         let _guard = self.write_lock.lock().map_err(|_| Error::msg("lock poisoned"))?;
         let allowed = ["passed", "failed", "needs_attention", "unverified"];
         if !allowed.contains(&request.status.as_str()) {
@@ -2990,10 +3252,12 @@ impl AgentHub {
     }
 
     pub fn mcp_upsert(&self, request: McpUpsertRequest) -> Result<McpServerView> {
+        let _runtime = self.runtime_guard()?;
         crate::mcp::upsert(self, request)
     }
 
     pub fn mcp_import(&self, request: McpImportRequest) -> Result<McpServerView> {
+        let _runtime = self.runtime_guard()?;
         crate::mcp::import(self, request)
     }
 
@@ -3086,6 +3350,27 @@ impl AgentHub {
 
 }
 
+/// Recursively fold the user's home directory prefix in every JSON string
+/// value (diagnostics export only).
+fn fold_home_paths(value: &mut serde_json::Value, home: &str) {
+    match value {
+        serde_json::Value::String(text) => {
+            *text = crate::redact::fold_home(text, home);
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                fold_home_paths(item, home);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (_key, item) in map.iter_mut() {
+                fold_home_paths(item, home);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn profile_view(row: ProfileRow) -> ProfileView {
     ProfileView {
         id: row.id,
@@ -3151,4 +3436,14 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
         diff |= a ^ b;
     }
     diff == 0
+}
+
+/// Remove `-wal` / `-shm` files next to a database after its connection has
+/// been closed. Used by backup restore so a stale WAL cannot be replayed over
+/// the restored snapshot.
+fn remove_sqlite_sidecars(db_path: &Path) {
+    for suffix in ["-wal", "-shm"] {
+        let sidecar = PathBuf::from(format!("{}{}", db_path.to_string_lossy(), suffix));
+        let _ = fs::remove_file(sidecar);
+    }
 }

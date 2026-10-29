@@ -383,3 +383,75 @@ fn approved_uninstall_removes_deployment_and_keeps_library_version() {
     assert_eq!(view.steps.len(), 1);
     assert_eq!(view.steps[0].state, "applied");
 }
+
+#[test]
+fn backup_restore_round_trip_creates_safety_copy() {
+    let fixture = Fixture::new();
+    let mut hub = fixture.hub();
+    let folder = write_skill(
+        &fixture.project.join("sources"),
+        "before-backup",
+        "Present before the backup.",
+        "v1",
+    );
+    let imported = hub.import_skill(folder_import(&folder)).expect("import");
+    let id = imported.skill.id.clone();
+    let backup = hub.create_backup().expect("create backup");
+    assert_eq!(hub.list_skills().expect("skills").len(), 1);
+
+    // Add another skill after the snapshot.
+    let later = write_skill(
+        &fixture.project.join("sources"),
+        "after-backup",
+        "Added after the backup.",
+        "v2",
+    );
+    hub.import_skill(folder_import(&later)).expect("import later");
+    assert_eq!(hub.list_skills().expect("skills").len(), 2);
+
+    let restored = hub.restore_backup(&backup.id).expect("restore");
+    assert!(restored.integrity_ok);
+    assert_eq!(restored.schema_version, 3);
+    assert_eq!(restored.capability_count, 1);
+    let skills = hub.list_skills().expect("skills after restore");
+    assert_eq!(skills.len(), 1);
+    assert_eq!(skills[0].id, id);
+    assert_ne!(restored.safety_backup_id, backup.id);
+    assert!(hub
+        .list_backups()
+        .expect("backups")
+        .iter()
+        .any(|view| view.id == restored.safety_backup_id));
+    assert!(hub.integrity_report().expect("integrity").ok);
+}
+
+#[test]
+fn restore_rejects_tampered_or_invalid_backups_without_touching_live_db() {
+    let fixture = Fixture::new();
+    let mut hub = fixture.hub();
+    let folder = write_skill(
+        &fixture.project.join("sources"),
+        "keep-me",
+        "Must survive failed restores.",
+        "v1",
+    );
+    hub.import_skill(folder_import(&folder)).expect("import");
+    let backup = hub.create_backup().expect("create backup");
+    assert_eq!(hub.list_skills().expect("skills").len(), 1);
+
+    // A path traversal id must be rejected before any filesystem access.
+    let err = hub.restore_backup("../backup-evil").expect_err("invalid id");
+    assert!(matches!(err, Error::InvalidSkill(_)), "unexpected: {err}");
+
+    // Tamper with the snapshot; checksum validation must refuse it.
+    let backup_db = Path::new(&backup.path).join("agenthub.db");
+    let mut bytes = fs::read(&backup_db).expect("read backup");
+    if let Some(last) = bytes.last_mut() {
+        *last ^= 0xff;
+    }
+    fs::write(backup_db, bytes).expect("write tampered backup");
+    let err = hub.restore_backup(&backup.id).expect_err("tamper rejected");
+    assert!(matches!(err, Error::Verification(_)), "unexpected: {err}");
+    assert_eq!(hub.list_skills().expect("skills").len(), 1);
+    assert!(hub.db().integrity_check().expect("integrity").ok);
+}

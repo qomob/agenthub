@@ -386,3 +386,53 @@ fn mcp_env_keys_without_keychain_values_are_blocked() {
     );
     assert_eq!(read(&fixture.codex_config()), before);
 }
+
+#[test]
+fn mcp_header_values_go_to_keychain_and_never_into_the_db_row() {
+    let security_available = std::path::Path::new("/usr/bin/security").exists();
+    if !security_available {
+        // Keychain storage is macOS-only; on other platforms the upsert path
+        // is covered by the empty-header tests above.
+        return;
+    }
+    let fixture = Fixture::new();
+    let hub = fixture.hub();
+
+    let mut request = http_request("keychain-headers");
+    request.headers.insert(
+        "Authorization".to_string(),
+        "Bearer tokHeaderValue".to_string(),
+    );
+    let view = agenthub_core::mcp::upsert(&hub, request).expect("upsert with header");
+    let server_id = view.id.clone();
+
+    // The view must not carry the raw value.
+    assert_eq!(
+        view.headers.get("Authorization").map(String::as_str),
+        Some("••••••"),
+        "view must mask header values"
+    );
+
+    // The DB row keeps the name with a blanked value.
+    let row = hub
+        .db()
+        .list_mcp()
+        .expect("list rows")
+        .into_iter()
+        .find(|row| row.id == server_id)
+        .expect("row exists");
+    assert_eq!(
+        row.headers,
+        vec![("Authorization".to_string(), String::new())],
+        "DB row must not store the header value"
+    );
+
+    // The value itself lives in the Keychain and round-trips.
+    assert_eq!(
+        agenthub_core::mcp::get_header_secret(&server_id, "Authorization").as_deref(),
+        Some("Bearer tokHeaderValue")
+    );
+
+    // Cleanup: remove the test secret from the user keychain.
+    let _ = agenthub_core::mcp::delete_header_secret(&server_id, "Authorization");
+}

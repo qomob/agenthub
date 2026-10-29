@@ -440,3 +440,59 @@ fn invalid_input_exits_3_with_invalid_input_code() {
         "inspect must carry a requestId: {envelope}"
     );
 }
+
+#[test]
+fn backup_restore_uses_safety_copy_and_normalized_exit_codes() {
+    let temp = TempDir::new().expect("temp dir");
+    let home = temp.path().join("home");
+    fs::create_dir_all(home.join(".codex")).expect("codex dir");
+    let config = CoreConfig::for_home(&home);
+    let hub = AgentHub::open(config.clone()).expect("open hub");
+    let source = temp.path().join("source/alpha");
+    fs::create_dir_all(&source).expect("source dir");
+    fs::write(source.join("SKILL.md"), SKILL_MD).expect("write skill");
+    hub.import_skill(ImportRequest {
+        source: ImportSource::Folder {
+            path: source.to_string_lossy().to_string(),
+        },
+        skill_path: None,
+        version_label: None,
+        notes: None,
+    })
+    .expect("import");
+    let backup = hub.create_backup().expect("backup");
+    drop(hub);
+
+    let out = cli(&home, &["backup", "restore", &backup.id, "--json"]);
+    assert_exit(&out, 0);
+    let envelope = stdout_json(&out);
+    assert_eq!(envelope["ok"], true, "envelope: {envelope}");
+    assert_eq!(envelope["data"]["backupId"], backup.id);
+    assert!(envelope["data"]["safetyBackupId"]
+        .as_str()
+        .unwrap_or_default()
+        .starts_with("backup-"));
+    assert_eq!(envelope["data"]["integrityOk"], true);
+    assert!(envelope["requestId"].as_str().unwrap_or_default().len() > 10);
+
+    let hub = AgentHub::open(config).expect("reopen");
+    assert_eq!(hub.list_skills().expect("skills").len(), 1);
+    assert!(hub.integrity_report().expect("integrity").ok);
+
+    // Unknown / traversal ids are invalid input (exit 3).
+    let out = cli(&home, &["backup", "restore", "../etc", "--json"]);
+    assert_exit(&out, 3);
+    assert_error_envelope(&out, "INVALID_INPUT");
+
+    // A tampered snapshot is refused as a recovery failure (exit 5) and the
+    // live database stays intact.
+    let tampered = Path::new(&backup.path).join("agenthub.db");
+    let mut bytes = fs::read(&tampered).expect("read backup");
+    if let Some(last) = bytes.last_mut() {
+        *last ^= 0xff;
+    }
+    fs::write(&tampered, bytes).expect("tamper backup");
+    let out = cli(&home, &["backup", "restore", &backup.id, "--json"]);
+    assert_exit(&out, 5);
+    assert_error_envelope(&out, "ROLLBACK_BLOCKED");
+}

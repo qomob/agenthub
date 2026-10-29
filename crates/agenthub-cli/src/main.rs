@@ -38,6 +38,8 @@ const EXIT_OK: u8 = 0;
 /// Legacy commands keep their historical generic-failure code.
 const EXIT_FAIL: u8 = 1;
 const EXIT_PARTIAL: u8 = 2;
+/// v3.1: invalid input, unsupported capability, unverified adapter.
+const EXIT_INVALID: u8 = 3;
 /// v3.1: approval required, stale plan, expired approval, wrong token.
 const EXIT_APPROVAL: u8 = 4;
 /// v3.1: runtime failure, or a recovery that needs manual intervention.
@@ -68,6 +70,12 @@ struct Cli {
 enum Commands {
     /// Run local diagnostics (library, database, data dir, git, agents).
     Doctor,
+    /// Export a secret-free diagnostics report (JSON) for bug reports.
+    Diagnostics {
+        /// Output file path (defaults to ~/Downloads/agenthub-diagnostics-<ts>.json).
+        #[arg(value_name = "FILE")]
+        path: Option<PathBuf>,
+    },
     /// Inspect detected agents.
     Agents {
         #[command(subcommand)]
@@ -177,6 +185,14 @@ enum ProfilesCommand {
 enum BackupCommand {
     /// Snapshot the metadata database into the library backups directory.
     Create,
+    /// Restore the metadata database from a validated backup (safety copy first).
+    Restore(RestoreArgs),
+}
+
+#[derive(Debug, Args)]
+struct RestoreArgs {
+    /// Backup id from `backups list`.
+    id: String,
 }
 
 #[derive(Debug, Subcommand)]
@@ -587,6 +603,14 @@ fn main() -> std::process::ExitCode {
 }
 
 fn run(cli: Cli) -> CliResult<u8> {
+    // Restore must own the AgentHub instance because it replaces the database
+    // file; it therefore runs before the shared context is created.
+    if let Commands::Backup {
+        command: BackupCommand::Restore(args),
+    } = &cli.command
+    {
+        return cmd_backup_restore(cli.home.as_deref(), args, cli.json);
+    }
     let hub = open_hub(cli.home.as_deref())?;
     let ctx = Ctx {
         hub,
@@ -594,6 +618,7 @@ fn run(cli: Cli) -> CliResult<u8> {
     };
     match cli.command {
         Commands::Doctor => cmd_doctor(&ctx),
+        Commands::Diagnostics { path } => cmd_diagnostics(&ctx, path.as_deref()),
         Commands::Agents { command } => match command {
             AgentsCommand::List => cmd_agents_list(&ctx),
             AgentsCommand::Inspect(args) => cmd_agents_inspect(&ctx, args),
@@ -630,6 +655,8 @@ fn run(cli: Cli) -> CliResult<u8> {
         Commands::Health(args) => cmd_health(&ctx, args),
         Commands::Backup { command } => match command {
             BackupCommand::Create => cmd_backup_create(&ctx),
+            // Handled before the shared context is created (needs &mut AgentHub).
+            BackupCommand::Restore(_) => unreachable!("restore is dispatched before context creation"),
         },
         Commands::Backups { command } => match command {
             BackupsCommand::List => cmd_backups_list(&ctx),
@@ -920,6 +947,29 @@ fn resolve_skill_id(hub: &AgentHub, wanted: &str) -> CliResult<String> {
 // ---------------------------------------------------------------------------
 // doctor
 // ---------------------------------------------------------------------------
+
+fn cmd_diagnostics(ctx: &Ctx, path: Option<&Path>) -> CliResult<u8> {
+    let out_path = match path {
+        Some(path) => path.to_path_buf(),
+        None => {
+            let base = std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .ok_or_else(|| CliError::legacy("cannot resolve a home directory"))?;
+            base.join(format!("agenthub-diagnostics-{}.json", agenthub_core::util::now().replace(':', "-")))
+        }
+    };
+    let export = ctx.hub.export_diagnostics(&out_path)?;
+    if ctx.json {
+        ctx.emit(&export)?;
+    } else {
+        println!(
+            "Diagnostics written to {} ({} bytes)\nContains no secrets: doctor checks, agent list, masked MCP servers, dashboard stats.",
+            export.path.display(),
+            export.bytes
+        );
+    }
+    Ok(0)
+}
 
 fn cmd_doctor(ctx: &Ctx) -> CliResult<u8> {
     let report = ctx.hub.doctor()?;
@@ -2097,6 +2147,48 @@ fn cmd_backup_create(ctx: &Ctx) -> CliResult<u8> {
         println!("  entries: {}", backup.entries);
     }
     Ok(EXIT_OK)
+}
+
+fn cmd_backup_restore(home: Option<&Path>, args: &RestoreArgs, json: bool) -> CliResult<u8> {
+    use agenthub_core::Error as CoreError;
+    let mut hub = open_hub(home)?;
+    match hub.restore_backup(&args.id) {
+        Ok(result) => {
+            if json {
+                let envelope = ApiResult::success(result.clone());
+                print_json(&serde_json::to_value(envelope)?);
+            } else {
+                println!(
+                    "Restored {} at {} (schema {}, integrity {}, capabilities {})",
+                    result.backup_id,
+                    result.restored_at,
+                    result.schema_version,
+                    result.integrity_ok,
+                    result.capability_count
+                );
+                println!("Safety backup: {}", result.safety_backup_id);
+            }
+            Ok(EXIT_OK)
+        }
+        Err(error) => {
+            let code = match &error {
+                CoreError::InvalidSkill(_) | CoreError::NotFound(_) => ErrorCode::InvalidInput,
+                _ => ErrorCode::RollbackBlocked,
+            };
+            let exit = if code == ErrorCode::InvalidInput {
+                EXIT_INVALID
+            } else {
+                EXIT_RUNTIME
+            };
+            let mut api_error = ApiError::from_error(&error);
+            api_error.code = code;
+            api_error.retryable = false;
+            Err(CliError::api(ApiFailure {
+                error: api_error,
+                exit,
+            }))
+        }
+    }
 }
 
 fn cmd_backups_list(ctx: &Ctx) -> CliResult<u8> {

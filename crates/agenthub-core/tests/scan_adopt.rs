@@ -75,7 +75,7 @@ fn scan_adopt_dedupes_across_agents_and_skips_read_only_caches() {
             ..Default::default()
         })
         .expect("adopt");
-    assert_eq!(adopted.imported_count, 2);
+    assert_eq!(adopted.imported_count, 2, "{adopted:?}");
     assert_eq!(adopted.skipped_duplicate, 1);
     assert_eq!(adopted.skipped_read_only, 1);
     let skills = hub.list_skills().expect("skills");

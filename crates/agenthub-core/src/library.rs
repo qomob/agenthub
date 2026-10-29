@@ -31,6 +31,9 @@ pub struct BackupManifest {
     pub database: String,
     pub capability_count: i64,
     pub installation_count: i64,
+    /// SHA-256 of the snapshot database file; `None` for legacy backups.
+    #[serde(default)]
+    pub database_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -121,7 +124,10 @@ impl Library {
     /// content-addressed and therefore already immutable inside the library.
     pub fn create_backup(&self, db: &crate::db::Database, app_version: &str) -> Result<crate::model::BackupResult> {
         let created_at = util::now();
-        let id = format!("backup-{}", util::now_for_path());
+        // Include a short random suffix so two backups created in the same
+        // second cannot collide on the VACUUM INTO target.
+        let suffix = util::new_id();
+        let id = format!("backup-{}-{}", util::now_for_path(), &suffix[..6]);
         let dir = self.backups_dir().join(&id);
         fs::create_dir_all(&dir)?;
         let db_target = dir.join("agenthub.db");
@@ -136,9 +142,14 @@ impl Library {
             database: db_target.to_string_lossy().to_string(),
             capability_count: db.count_capabilities("skill")?,
             installation_count: db.count("installations")?,
+            database_sha256: Some(util::hash_file(&db_target)?),
         };
         let manifest_json = serde_json::to_string_pretty(&manifest)?;
         util::atomic_write(&dir.join("manifest.json"), manifest_json.as_bytes())?;
+        // Backups contain the full metadata database (MCP definitions, agent
+        // paths, notes). Restrict them to the owner so other local users and
+        // sync/backup agents do not read them by default.
+        restrict_owner_permissions(&dir);
         // Record the backup inside the registry for the Activity page.
         let plan = crate::model::OperationPlan {
             operation_id: String::new(),
@@ -269,4 +280,23 @@ pub fn validate_new_root(path: &Path) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+/// Restrict a freshly created backup directory and its files to the owning
+/// user (0700 / 0600). Best-effort on non-Unix platforms.
+fn restrict_owner_permissions(dir: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let _ = fs::set_permissions(entry.path(), fs::Permissions::from_mode(0o600));
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+    }
 }

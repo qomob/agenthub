@@ -15,6 +15,8 @@ pub mod library;
 pub mod mcp;
 pub mod model;
 pub mod ops;
+pub mod redact;
+pub mod runtime;
 pub mod scan;
 pub mod service;
 pub mod skill;

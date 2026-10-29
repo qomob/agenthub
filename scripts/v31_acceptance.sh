@@ -38,6 +38,7 @@ if [ -f "$HOME/.agenthub/agenthub.db" ]; then
   [ -f "$HOME/.agenthub/agenthub.db-wal" ] && cp "$HOME/.agenthub/agenthub.db-wal" "$LOG/legacy-home/.agenthub/agenthub.db-wal"
   [ -f "$HOME/.agenthub/agenthub.db-shm" ] && cp "$HOME/.agenthub/agenthub.db-shm" "$LOG/legacy-home/.agenthub/agenthub.db-shm"
   BEFORE=$(sqlite3 "$LOG/legacy-home/.agenthub/agenthub.db" 'select count(*) from capabilities;' 2>/dev/null)
+  SRCVER=$(sqlite3 "$LOG/legacy-home/.agenthub/agenthub.db" 'PRAGMA user_version;' 2>/dev/null)
   # Point the copied registry at the isolated library root (never the real one).
   sqlite3 "$LOG/legacy-home/.agenthub/agenthub.db" "UPDATE settings SET value='$LOG/legacy-home/.agenthub' WHERE key='library_root';" 2>/dev/null
   sqlite3 "$LOG/legacy-home/.agenthub/agenthub.db" "UPDATE settings SET value='[]' WHERE key='project_roots';" 2>/dev/null
@@ -50,8 +51,15 @@ if [ -f "$HOME/.agenthub/agenthub.db" ]; then
   [ "$VER" = "3" ] && pass "schema user_version=3" || fail "schema user_version=$VER"
   INTEG=$(sqlite3 "$LOG/legacy-home/.agenthub/agenthub.db" 'PRAGMA integrity_check;')
   [ "$INTEG" = "ok" ] && pass "integrity_check ok" || fail "integrity_check: $INTEG"
-  ls "$LOG/legacy-home/.agenthub/backups"/pre-migration-v2-*/agenthub.db >/dev/null 2>&1 \
-    && pass "pre-migration backup exists" || fail "pre-migration backup missing"
+  # The pre-migration backup only exists when this copy actually migrated
+  # (source user_version < 3). Re-runs against an already-v3 database skip
+  # migration by design and must not fail on the absent backup.
+  if [ "${SRCVER:-0}" -lt 3 ]; then
+    ls "$LOG/legacy-home/.agenthub/backups"/pre-migration-v2-*/agenthub.db >/dev/null 2>&1 \
+      && pass "pre-migration backup exists" || fail "pre-migration backup missing"
+  else
+    echo "SKIP  pre-migration backup (source DB already v3, no migration ran)"
+  fi
 else
   echo "SKIP  no real ~/.agenthub database on this machine"
 fi
@@ -135,6 +143,56 @@ CODE=$?
 RECOVERED=$(cat "$LOG/home/.codex/skills/alpha-v31-acceptance/SKILL.md")
 [ "$RECOVERED" = "edited by another app" ] && pass "recovery preserved external edit" || fail "recovery overwrote external edit"
 grep -q 'needs_manual_recovery' "$LOG/recover.json" && pass "recovery reports needs_manual_recovery" || fail "recovery JSON lacks needs_manual_recovery"
+
+
+# ---------------------------------------------------------------------------
+# 5. Metadata backup -> mutate -> restore round trip (safety copy).
+# ---------------------------------------------------------------------------
+echo "== backup restore =="
+"$BIN" backup create --json > "$LOG/backup.json" 2> "$LOG/backup.err"
+CODE=$?
+[ "$CODE" -eq 0 ] && pass "backup create (exit 0)" || { fail "backup create (exit $CODE)"; cat "$LOG/backup.err"; }
+BID=$(json "['id']" < "$LOG/backup.json")
+[ -n "$BID" ] && pass "backup id=$BID" || fail "missing backup id"
+mkdir -p "$LOG/src/beta-skill"
+cat > "$LOG/src/beta-skill/SKILL.md" <<'SKILL'
+---
+name: beta-v31-acceptance
+description: Created after the backup to prove restore.
+version: 1.0.0
+---
+# Beta
+SKILL
+"$BIN" skills import --path "$LOG/src/beta-skill" --json > "$LOG/import-beta.json" 2>/dev/null
+BEFORE_RESTORE=$("$BIN" skills list --json 2>/dev/null | python3 -c 'import json,sys;print(len(json.load(sys.stdin)))')
+[ "$BEFORE_RESTORE" = "2" ] && pass "second skill imported before restore" || fail "expected 2 skills, got $BEFORE_RESTORE"
+"$BIN" backup restore "$BID" --json > "$LOG/restore.json" 2> "$LOG/restore.err"
+CODE=$?
+[ "$CODE" -eq 0 ] && pass "backup restore (exit 0)" || { fail "backup restore (exit $CODE)"; cat "$LOG/restore.err"; }
+AFTER_RESTORE=$("$BIN" skills list --json 2>/dev/null | python3 -c 'import json,sys;print(len(json.load(sys.stdin)))')
+[ "$AFTER_RESTORE" = "1" ] && pass "restore rolled back to 1 skill" || fail "expected 1 skill after restore, got $AFTER_RESTORE"
+SAFETY=$(json "['data']['safetyBackupId']" < "$LOG/restore.json"); [ -z "$SAFETY" ] && SAFETY=$(json "['safetyBackupId']" < "$LOG/restore.json")
+[ -n "$SAFETY" ] && pass "safety backup created: $SAFETY" || fail "no safety backup"
+
+# ---------------------------------------------------------------------------
+# 6. Real read-only scan through a symlinked home (never writes to agents).
+# ---------------------------------------------------------------------------
+echo "== real read-only scan =="
+mkdir -p "$LOG/realhome/.agenthub"
+for agent in .codex .zcode .workbuddy .dsh .qwenworkcn .agents .claude; do
+  [ -e "$HOME/$agent" ] && ln -sfn "$HOME/$agent" "$LOG/realhome/$agent"
+done
+if [ -d "$HOME/Library/Application Support/Trae CN" ]; then
+  mkdir -p "$LOG/realhome/Library/Application Support"
+  ln -sfn "$HOME/Library/Application Support/Trae CN" "$LOG/realhome/Library/Application Support/Trae CN"
+fi
+AGENTHUB_HOME="$LOG/realhome" "$BIN" skills scan --json > "$LOG/real-scan.json" 2> "$LOG/real-scan.err"
+CODE=$?
+[ "$CODE" -eq 0 ] && pass "real read-only scan (exit 0)" || { fail "real scan (exit $CODE)"; tail -5 "$LOG/real-scan.err"; }
+TOTAL=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["totalSkills"])' "$LOG/real-scan.json" 2>/dev/null)
+[ "${TOTAL:-0}" -gt 0 ] 2>/dev/null && pass "real scan discovered $TOTAL skills (read-only)" || fail "real scan discovered no skills (total=$TOTAL)"
+# The real agent roots must still be untouched: the temp home only holds symlinks.
+[ ! -e "$LOG/realhome/.agenthub/skills" ] && pass "scan data stayed in temp home" || fail "unexpected write into temp library"
 
 echo
 if [ "$FAIL" -eq 0 ]; then

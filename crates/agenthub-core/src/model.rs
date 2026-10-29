@@ -4,6 +4,7 @@
 //! variants use snake_case strings so they are stable across languages.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
@@ -938,6 +939,15 @@ pub struct SettingsUpdate {
     pub scan_on_startup: Option<bool>,
 }
 
+/// Result of `AgentHub::export_diagnostics`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnosticsExport {
+    pub path: PathBuf,
+    pub bytes: usize,
+    pub generated_at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DoctorReport {
@@ -997,6 +1007,19 @@ pub struct BackupView {
     pub path: String,
     pub created_at: String,
     pub size_bytes: i64,
+}
+
+/// Result of restoring a metadata snapshot. A safety backup of the state that
+/// was replaced is always produced first.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreResult {
+    pub backup_id: String,
+    pub restored_at: String,
+    pub safety_backup_id: String,
+    pub schema_version: i64,
+    pub integrity_ok: bool,
+    pub capability_count: i64,
 }
 
 // ---------------------------------------------------------------------------

@@ -3,11 +3,11 @@ resolver = "2"
 members = ["crates/agenthub-core", "crates/agenthub-cli", "src-tauri"]
 
 [workspace.package]
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 authors = ["AgentHub Contributors"]
 license = "MIT"
-repository = "https://github.com/agenthub/agenthub"
+repository = "https://github.com/qomob/agenthub"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

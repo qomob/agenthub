@@ -77,6 +77,33 @@ impl AppState {
         };
         ApiResult::from_result(action(hub))
     }
+
+    /// Same contract as `run_api`, but with mutable access for operations that
+    /// replace the database file (backup restore).
+    fn run_api_mut<T>(
+        &self,
+        action: impl FnOnce(&mut AgentHub) -> agenthub_core::Result<T>,
+    ) -> ApiResult<T> {
+        let mut guard = match self.hub.lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                return ApiResult::failure(ApiError::new(
+                    ErrorCode::Internal,
+                    "state lock poisoned",
+                ))
+            }
+        };
+        let Some(hub) = guard.as_mut() else {
+            let message = self
+                .init_error
+                .lock()
+                .ok()
+                .and_then(|error| error.clone())
+                .unwrap_or_else(|| "AgentHub is not initialized".to_string());
+            return ApiResult::failure(ApiError::new(ErrorCode::Internal, message));
+        };
+        ApiResult::from_result(action(hub))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -328,6 +355,11 @@ fn backups_list(state: State<'_, AppState>) -> Result<Vec<BackupView>, String> {
     state.run(|hub| hub.list_backups())
 }
 
+#[tauri::command(rename_all = "snake_case")]
+fn backups_restore(state: State<'_, AppState>, backup_id: String) -> ApiResult<RestoreResult> {
+    state.run_api_mut(|hub| hub.restore_backup(&backup_id))
+}
+
 // ---------------------------------------------------------------------------
 // MCP
 // ---------------------------------------------------------------------------
@@ -563,6 +595,7 @@ pub fn run() {
             snapshots_list,
             backups_create,
             backups_list,
+            backups_restore,
             mcp_list,
             mcp_discover,
             mcp_upsert,
