@@ -71,6 +71,7 @@ AgentHub 是「本地 Agent 能力控制中心（Capability Control Center）」
 | 验证-状态机 | `validation.rs` | 由 audit/deps/validations/installed agents 推导 HealthState | 不自动判定通过 |
 | Agent 健康 | `agent_health.rs` | `.app`/CLI 版本探测、2s 超时、baseline/changed | 不猜测版本 |
 | 工具 | `util.rs` | hash、原子写、安全删除/复制、路径规范化 | 不含业务语义 |
+| 运行时锁 | `runtime.rs` | 跨进程互斥（`<data_dir>/runtime.lock` 上的 flock）：修改类操作（apply/rollback/backup/restore）全程持有；进程死亡自动释放；忙时返回 `Blocked` 并指明持有者（kind+pid）。只读操作不加锁（已验证：`tests/runtime_lock.rs`） | 不排队等待、不做 owner 抢占 |
 | 错误 | `error.rs` | 统一错误分类（Conflict/Blocked/Verification/ExternalModification…） | — |
 
 **关键约束**：`adapters` 只描述「在哪、支持什么」，写入只由 `ops`/`mcp` 执行（`adapters/mod.rs:1-8`）。这样新增 Agent 不会绕过事务与安全逻辑。

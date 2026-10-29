@@ -1,10 +1,12 @@
 # AgentHub · Capability Control Center
 
+> **当前版本：0.5.0**（2026-10-28，变更明细见 [docs/CHANGELOG.md](docs/CHANGELOG.md)）。License：MIT（见 `LICENSE` 与 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)；源码仓库：https://github.com/qomob/agenthub）。
+
 > **本机 Agent 能力控制中心**：集中登记散落在 Codex、TRAE、ZCode、WorkBuddy、DeepSeek Harness、Qwen Work、Doubao Work 等 Agent 目录里的 **Skills / MCP / 插件清单**，通过适配器事务化分发，并用 **静态审计 + 依赖诊断 + 更新影响 + 人工验证证据 + Agent 版本健康** 回答「装没装、能不能用、安不安全、更新后会不会坏」。
 >
 > **v3.1 Phase 1 安全切片（2026-10-20 18:45）**：新增 **plan_hash → 一次性 approval token（15 分钟过期）→ apply → CAS → journal → recover** 安全链路、`operation_steps` 持久日志、`adapter_evidence` 证据分级、迁移前自动备份，以及 `operations preview/approve/apply/recover`、`agents inspect` IPC/CLI 与两步审批 UI。测试 **113 Rust + 55 前端**全部通过；真实库副本 v2→v3 迁移 111 个能力完整保留；隔离双宿主分发/回滚/外部修改保护验收通过。真实 Agent 写入仍未授权、未执行。详见 [docs/handoffs/LATEST.md](docs/handoffs/LATEST.md)、[docs/evidence/phase1/](docs/evidence/phase1/)。
 >
-> 状态快照：**2026-10-20 17:37（Asia/Shanghai）**。**0.4.0 技能库可见性修复已落地**：Skills 页新增「中央库 / 扫描发现」，支持跨 Agent 去重、批量导入中央库与 `skills adopt`；真实机器重新扫描 396 候选 → 跳过只读 273、重复 11、导入 **112** 个（55 MB、失败 0），中央库能力数从 2 → **111**。此前适配器扩展（Qwen Work / Doubao Work，总数 11）与 Validation Platform 仍在。测试：core **82**（44 unit + 38 integration，含 scan_adopt 2）+ CLI **16** = **98 个 Rust 测试**，前端 **8 files / 38 tests**，全部通过。代码版本 **0.4.0**；**0.4.0 `.app` 与 `.dmg` 已构建并覆盖安装 `/Applications`**（17:36–17:37）；签名/公证未做。详见 [docs/VALIDATION.md](docs/VALIDATION.md)、[docs/ACCEPTANCE-REPORT.md](docs/ACCEPTANCE-REPORT.md)、[已知限制](#已知限制)。
+> 状态快照：**2026-10-20 17:37（Asia/Shanghai）**（当前代码版本 **0.5.0**，见 [docs/CHANGELOG.md](docs/CHANGELOG.md)；下述为 0.4.0 节点的历史验收记录）。**0.4.0 技能库可见性修复已落地**：Skills 页新增「中央库 / 扫描发现」，支持跨 Agent 去重、批量导入中央库与 `skills adopt`；真实机器重新扫描 396 候选 → 跳过只读 273、重复 11、导入 **112** 个（55 MB、失败 0），中央库能力数从 2 → **111**。此前适配器扩展（Qwen Work / Doubao Work，总数 11）与 Validation Platform 仍在。测试：core **82**（44 unit + 38 integration，含 scan_adopt 2）+ CLI **16** = **98 个 Rust 测试**，前端 **8 files / 38 tests**，全部通过。**0.4.0 `.app` 与 `.dmg` 已构建并覆盖安装 `/Applications`**（17:36–17:37）；签名/公证未做（截至 0.5.0 仍未做，分发给他人前需完成）。详见 [docs/VALIDATION.md](docs/VALIDATION.md)、[docs/ACCEPTANCE-REPORT.md](docs/ACCEPTANCE-REPORT.md)、[已知限制](#已知限制)。
 
 AgentHub 是 **本地优先** 的 macOS 桌面应用（Tauri 2 + Vue 3 + Rust + SQLite），无账号、无云端、无遥测。GUI 与 CLI 共用同一个 `agenthub-core` 引擎。
 
@@ -373,7 +375,17 @@ $BIN --home "$AGENTHUB_HOME" doctor
 
 ## 安全说明
 
+### 数据边界（收集 / 不收集清单）
+
+- 📊 **本机读取**：Skills / MCP / 插件清单、各 Agent 配置目录、Agent 版本信息（仅本地处理）
+- 🚫 **绝不读取或收集**：对话内容、Prompt 文本、API Key / token 原值；无遥测上报
+- 🔐 **凭据**：MCP env 值只存 macOS Keychain；日志与分发计划只记 key 名 / 路径 / hash
+- 🎛️ **您的控制**：删除 `~/.agenthub/` 即清除全部元数据；各 Agent 目录内容仅经显式批准的事务修改
+
+### 机制说明
+
 - **纯本地**：无账号、无遥测、无云同步；唯一出站是用户显式触发的 `git clone`。
+- **跨进程互斥**：GUI 与 CLI 共用一套数据，修改类操作（apply / rollback / backup / restore）全程持有 `~/.agenthub/runtime.lock`（flock，进程退出自动释放）；另一进程同时发起修改会得到明确的「runtime busy + 持有者」错误，绝不交错写入。
 - **写入前预览**：GUI 弹计划、CLI 默认只打印计划；目标、动作、哈希、警告、重启提示全部可见。
 - **快照与回滚**：每次写入前快照；失败自动逆序恢复；操作级回滚需显式确认。
 - **不可信输入**：zip 拒绝路径穿越/绝对路径/symlink 条目/超限；Git 只浅克隆、不执行仓库脚本、删除 `.git`；Markdown 渲染不使用 `v-html`。
@@ -557,4 +569,4 @@ pnpm tauri build
 
 ## License
 
-MIT（见 `Cargo.toml` 的 `workspace.package.license`）。
+MIT（见根目录 `LICENSE` 与 `Cargo.toml` 的 `workspace.package.license`）。

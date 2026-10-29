@@ -8,6 +8,8 @@ target/
 dist/
 dist-ssr/
 *.local
+!landing/dist/
+!landing/dist/**
 
 # Tauri generated
 src-tauri/gen/
@@ -28,8 +30,20 @@ src-tauri/target/
 coverage/
 .tmp-test/
 
-# Local skill artifacts the user keeps next to the project (not part of AgentHub)
+# Local reference / archive directories the user keeps next to the project (not part of AgentHub, not published)
 /skill-compiler/
 /skillforge/
 /xskill-are/
+/AgentHub-v3.1/
 /*.zip
+
+# Local build/test scratch areas (never publish)
+.cargo-home/
+.dsh-smoke/
+
+# 内部交接与验收证据：含本机绝对路径（用户名），不随开源发布（文件保留在本地）
+/docs/ACCEPTANCE-REPORT.md
+/docs/AGENT-COMPATIBILITY.md
+/docs/compat-evidence/
+/docs/evidence/
+/docs/handoffs/

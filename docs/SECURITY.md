@@ -10,7 +10,7 @@
 1. **Local First，无云端**：没有账号、遥测、云同步；网络访问只发生在用户主动使用 Git 导入时，由本机 `git` 完成（`skill.rs:462-505`）。核心 crate 不依赖任何 HTTP 客户端（`Cargo.toml`/`crates/agenthub-core/Cargo.toml` 无 reqwest/hyper 等）。
 2. **默认不破坏**：不覆盖非 AgentHub 拥有的目标；每次外部写入前先快照；失败逆序恢复；删除只针对已记录的安装。
 3. **能力诚实**：未验证的适配器能力标 `Unverified`/`VerificationRequired`，不假装可用（见 [ADAPTER-SPEC.md](ADAPTER-SPEC.md)）。
-4. **凭据不是内容**：MCP env 值只存 macOS Keychain，数据库只存 key 名；分发计划 payload 已剥离 env、执行时从 Keychain 重建。headers / 快照仍有明文风险（见 §5）。
+4. **凭据不是内容**：MCP env 值与 headers 值只存 macOS Keychain，数据库只存 key 名；分发计划 payload 已剥离 env 与 headers 值、执行时从 Keychain 重建。secret 写入 Keychain 走 `security -i` stdin 通道，不经进程 argv（含引号/换行的值回退 argv，见 §5）。快照仍是明文复制（见 R4）。
 5. **数据库不是密钥库**：Library、备份、快照、SQLite 都按普通用户文件保护，没有额外加密。
 
 > 重要：AgentHub 目前**不是 App Sandbox 应用**，没有 entitlements、没有代码签名/公证配置、没有内置提权。它以当前用户权限运行，能读写用户可访问的任意路径——安全边界依赖「路径白名单 + 事务 + 用户确认」，而不是操作系统沙箱。这是 MVP 的明确限制。
@@ -44,7 +44,7 @@
 | T2 | **符号链接逃逸** | 导入目录/库内容/部署目标 | `hash_dir` 拒绝指向技能根之外的 symlink（`util.rs:65-109`）；`copy_dir` 拒绝复制逃逸链接（`util.rs:199-234`）；`remove_path` 用 `symlink_metadata` 不跟随（`util.rs:183-197`）；部署后校验 symlink 解析在库内（`ops.rs:479-521`） | 目标 Agent 是否跟随 symlink 未逐一验证（只有 DSH 标 `Supported`）；symlink 安装本身可能把库路径暴露给 Agent |
 | T3 | **路径穿越 / 任意目标写入** | 计划注入、自定义根、MCP target | 目标必须绝对路径且有父/文件名（`ops.rs:210-222`）；自定义根必须绝对路径（`service.rs:269-276`）；MCP target 来自 adapter 的固定 spec；归档路径规范化 | `target_within_roots()` 存在但**没有调用方**（`ops.rs:870-882`）；当前只靠 adapter/root 生成路径，缺少最后一道白名单断言 |
 | T4 | **外部篡改**（用户/IDE 在预览后改了文件） | Skill/MCP 目标 | 计划记录 `current_hash`/`entry_hash`；preflight 拒绝 Create/Replace/Remove 与预期不符的目标；回滚拒绝覆盖操作后被修改的目标（`ops.rs:200-292`、`ops.rs:697-710`） | MCP 已改为按条目 hash 比较（`ops.rs:220-260`）；本次测试以非 force 通过 |
-| T5 | **凭据泄露（落库/落盘/日志）** | env/headers、快照、备份、进程参数 | env 值只进 Keychain（`mcp.rs:22-105`）；DB 的 `mcp_definitions.env_keys` 只有 key 名；**分发计划 payload 已剥离 env 值**，执行时才从 Keychain 重建（`mcp.rs:883-890`、`mcp.rs:1111-1122`）；审计日志只记 id/路径/hash（`ops.rs:24-44`） | **headers 值明文入库并写入配置**；`security add-generic-password -w <value>` 会让 secret 短暂出现在进程参数中；快照/备份复制含 token 的配置文件且不加密 |
+| T5 | **凭据泄露（落库/落盘/日志）** | env/headers、快照、备份、进程参数 | env 值只进 Keychain（`mcp.rs:22-105`）；DB 的 `mcp_definitions.env_keys` 只有 key 名；**分发计划 payload 已剥离 env 值**，执行时才从 Keychain 重建（`mcp.rs:883-890`、`mcp.rs:1111-1122`）；审计日志只记 id/路径/hash（`ops.rs:24-44`） | headers 值只存 Keychain、DB 行只存 header 名（值已置空），计划 payload 同样剥离；`security -i` stdin 模式避免 argv 暴露（引号/反斜杠/换行值回退 argv，属残余风险）；快照/备份仍复制含 token 的配置文件且不加密 |
 | T6 | **并发写入** | GUI + CLI 同时操作 | 进程内 `write_lock`；apply/rollback 用 `<library_root>/.agenthub.lock` 跨进程互斥（`ops.rs:35-46`）；SQLite WAL + busy_timeout=5s | import/staging、`mcp_upsert`、`mcp_set_secret`、设置写入没有跨进程锁；两个进程可能同时规划同一目标 |
 | T7 | **不可信 Git 仓库** | `skills import --git` | 仅接受 https/http/ssh/git@/file:///绝对路径；浅克隆 `--depth 1 --no-tags`；删除 `.git`；不递归 submodule；`GIT_TERMINAL_PROMPT=0`、`GIT_ASKPASS=true`（`skill.rs:462-505`） | 不校验签名/来源；不限制仓库大小；`git` 本身及全局 config 可信；导入内容可能含恶意提示词/脚本，AgentHub 不执行但会分发 |
 | T8 | **UI 注入（XSS/危险链接）** | 技能详情、MCP 原始 JSON、路径 | SKILL.md 用自定义块解析 + 文本插值，**不使用 `v-html`**（`src/lib/markdown.ts`）；Tauri CSP `script-src 'self'`、`style-src 'unsafe-inline'`（`tauri.conf.json`）；外部链接通过 `opener` 打开固定官方 URL | 页面已落地但未做运行时注入验证；`style-src 'unsafe-inline'` 是 Tailwind/内联样式需要；未来若渲染 HTML 或用户 URL 需重新评估 |
@@ -110,6 +110,29 @@
 - **Keychain**：`/usr/bin/security` 固定路径；service `com.agenthub.mcp`；account `<server_id>/<key>`；只允许设置已声明的 `env_keys`（`service.rs:1884-1897`）。
 - **用户可见风险**：分发带 env 的 server 时，计划项含 warning「值会被写入 Agent 配置文件」（`mcp.rs:926-931`）。
 
+### 3.6 诊断导出脱敏边界（2026-10-29 更新）
+
+`agenthub diagnostics`（`export_diagnostics`，`service.rs`）导出 doctor / agents / mcpServers / dashboard / skillSummary。脱敏规则与边界：
+
+- **URL 查询串与 fragment 一律剥离**：MCP `url` 只保留 `scheme://host[:port]/path`（`redact.rs: redact_url`），`?token=...`、`#...` 与 userinfo（`user:pass@`）不进入导出。
+- **stdio `args` 启发式脱敏**：`--api-key/--token/--secret/--header/-H` 等标志的**后随值**及 `--token=<值>` 内联形式替换为 `[REDACTED]`（`redact.rs: redact_args`）。启发式按常见标志名匹配，**不识别自定义 flags**——残余风险：用户以非常规 flag 传秘密时不会被脱敏。
+- **主目录路径折叠**：导出 JSON 中所有字符串值的 `$HOME` 前缀折叠为 `~`（`fold_home_paths`），不泄露用户名与目录布局。
+- **Header/env 值本来就不导出**：headers 掩码为 `••••••`、env 只导 key 名、token 只存 Keychain；skill 内容不导出（仅 total 计数）。
+- **测试**：`crates/agenthub-core/tests/safety_fixes.rs::diagnostics_export_redacts_url_and_argv_secrets_and_home_paths` 覆盖 URL query、argv secret 与路径折叠。
+- **注意**：分发写入目标 Agent 配置文件的 MCP 条目**不脱敏**（那是功能本身）；脱敏只发生在诊断导出边界。
+
+### 3.7 备份与恢复边界（2026-10-29 更新）
+
+- **备份 = 元数据库快照（VACUUM INTO）+ manifest（含 SHA-256）**，目录与文件权限收紧为 0700/0600（`library.rs: restrict_owner_permissions`）。**不包含**：library/skills 内容文件（内容寻址；恢复 DB 后若 library 目录损坏需重新导入/安装，`plan_install` 会报 `library copy is missing`）、Keychain 中的 header/env secret（换机即丢）、Agent 原生配置目录。恢复能力以产品内「备份/恢复」页面说明为准。
+- **恢复序列**：manifest/SHA-256 校验 → 只读 `integrity_check` → 自动 safety backup → 原子换文件（先 drop 活连接、清 WAL/SHM）→ 失败自动回滚 safety 副本（`service.rs: restore_backup`）。
+- **残余风险**：恢复窗口内进程被 kill 可能留下需手工恢复的状态；恢复只挡 AgentHub 自身进程，外部 `sqlite3` 直连不在防护范围。备份默认在 `~/.agenthub/backups/`，若用户把 library_root 指到同步盘，备份会随同步扩散（已收紧权限，仍建议用户自行排除）。
+
+### 3.8 跨进程互斥（2026-10-29 更新）
+
+- `runtime.rs` 的 runtime lock（flock on `<data>/runtime.lock`）覆盖所有修改类入口：apply / rollback / backup / restore / recover / import / scan-import / settings / library-root 迁移 / profile 增删改 / MCP 增改导入 / 计划持久化（`persist_plan`）/ 校验记录 / 项目根设置 / agent 记录同步（仅在检测到变化时升级为加锁写入）。
+- **锁文件永不删除**（unlink-on-release 会让两个进程同时"持有"锁——`tests/runtime_lock.rs::releasing_the_lock_must_not_unlink_the_lock_file` 回归）；flock 随进程死亡自动释放，残留的零长度 lock 文件无害。
+- **已知限制**：`AgentHub::open` 仍会执行一次幂等的初始化写入（schema migrate、seed defaults/profiles、首次 agent 检测），受 runtime lock 保护但意味着"首次打开"不是纯只读操作；只读列表路径在稳态下不写库、不加锁。
+
 ### 3.5 Tauri/前端边界
 
 - 命令层只暴露固定 38 个命令（`src-tauri/src/lib.rs`），全部经过 `AgentHub`，不提供任意 shell/文件读写命令。
@@ -128,7 +151,7 @@
 | 读取范围 | 仅 adapter 声明的 skill 根 + MCP 配置文件 + 用户选择目录 | 基本最小；WorkBuddy 扫描根不含凭据目录 |
 | 写入范围 | 安装根 / MCP target / 库目录 / 快照 / 备份 | 缺少 `target_within_roots` 断言 |
 | 网络 | 默认 0；仅 Git 导入时调用本机 git | 合理 |
-| Keychain | 仅 MCP env；按 server/key 命名 | 合理，但 `security` CLI 会短暂暴露 argv |
+| Keychain | MCP env 与 headers；按 `server/key` 与 `server/header/name` 命名 | 写入走 `security -i` stdin，不经 argv（特殊字符回退 argv） |
 | 后台常驻 | 无 watcher、无定时任务 | 无额外攻击面 |
 | 自动更新 | 无 | 无供应链更新面 |
 
@@ -158,7 +181,7 @@ MCP env 值：
 ### 5.1 凭据处理规则（目标态）
 
 1. 数据库只存 `env_keys`（key 名）与 `credential_refs`（引用）——**已实现（env）**。
-2. headers 值应视为凭据：不应明文入库；当前**未实现**（见 §6.2）。
+2. headers 值应视为凭据：0.5.0 起只存 Keychain，DB 与计划均不含其值（见 §6.2）。
 3. 日志不得包含 env/headers 值；当前 JSONL 审计只写 id/kind/status/hash/error，不写 secret（见 §6.4）。
 4. 备份/快照应排除凭据文件；当前**没有排除**——快照是整目录/整文件复制。
 5. UI 只显示 key、不显示 value；MCP 列表展示 `envKeys`，详情页应只显示「已设置/未设置」（`SecretState`）。
@@ -176,9 +199,9 @@ MCP env 值：
 
 | # | 风险 | 证据 | 建议/状态 |
 |---|---|---|---|
-| R1 | ~~MCP env 值进入 `operations.plan`~~ **已修复** | `mcp.rs:883-890`、`mcp.rs:959`、`mcp.rs:1111-1122` | 计划 payload 不再含 env；执行时从 Keychain 重建。**headers 值仍会进 payload**（见 R2） |
-| R2 | **headers 明文入库/入配置** | `mcp.rs:712`（存 headers）、`mcp.rs:466-474`（写入配置） | headers 可能含 `Authorization`；UI 已警示，但仍应改为 Keychain 引用。当前未修复 |
-| R3 | **`security` argv 暴露 secret** | `mcp.rs:43-63`：`security add-generic-password ... -w <value>` | 同用户的其他进程可在极短窗口读到 argv；应改用 stdin/交互输入方式（`security` 支持从 stdin 读取时需验证） |
+| R1 | ~~MCP env 值进入 `operations.plan`~~ **已修复** | plan/apply 均从 Keychain 重建 | 计划 payload 不含 env |
+| R2 | ~~headers 明文入库/入配置~~ **已修复（0.5.0）** | headers 值只存 Keychain，DB 行只存 header 名（值置空）；计划 payload 剥离 headers，执行时重建；`list_servers` 自动迁移存量明文行；视图返回掩码值 | 写入目标 Agent 配置文件时仍为明文（Agent 协议所需，UI 已警示） |
+| R3 | ~~`security` argv 暴露 secret~~ **已修复（0.5.0）** | 默认走 `security -i` stdin 模式（已实测），secret 不出现在 argv；含引号/反斜杠/换行的值无法被 `security -i` 词法解析，**回退 argv 模式**（残余风险） |
 | R4 | **快照/备份含明文凭据** | `snapshot_target` 整文件复制；`create_backup` 复制 DB | 备份目录应与库同权限保护；文档与 UI 应提示「快照可能含配置中的 token」 |
 | R5 | ~~MCP 非 force 被误报外部修改~~ **已修复** | `ops.rs:220-260`、`mcp.rs:1002-1060` | MCP preflight 改为按条目 hash；移除计划记录当前条目 hash。回归测试通过 |
 | R6 | **`target_within_roots` 未调用** | `ops.rs:870-882` | 建议在 preflight 中按 adapter install roots 做最终断言 |

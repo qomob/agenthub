@@ -2,6 +2,38 @@
 
 本项目遵循「没有验证过的能力不写成已提供」的原则；版本号从 `0.1.0` 起。
 
+## 0.5.1 — 2026-10-29（生产安全修复切片，未发布）
+
+### Fixed
+
+- **runtime.lock 释放竞态**：guard Drop 不再删除 `<data_dir>/runtime.lock`（删除会让"旧 inode 持有者"与"新文件持有者"并存，互斥失效）。回归测试 `tests/runtime_lock.rs::releasing_the_lock_must_not_unlink_the_lock_file`（修复前红/修复后绿）。
+- **跨进程互斥覆盖补全**：import、scan-import、settings / library-root 迁移、profile 增删改、MCP 增改导入、校验记录、项目根设置、计划持久化（`persist_plan`）、recover、agent 记录同步全部持有 runtime lock（`runtime_guard`，线程内可重入）；`sync_agents` 改为变化检测——稳态下只读路径不再写库。测试 `tests/safety_fixes.rs`。
+- **诊断导出脱敏**：MCP `url` 剥离 query/fragment/userinfo；stdio `args` 中 `--api-key/--token/--secret/--header` 等后随值与内联 `=` 形式替换为 `[REDACTED]`；导出 JSON 全量 `$HOME`→`~` 折叠。新增 `redact.rs`（单元测试）+ 集成测试；`docs/SECURITY.md §3.6` 记录脱敏边界与残余风险（自定义 flag 不识别）。
+- **Profile 更新原子化**：先全量校验 capability，再在单事务内替换 items；中途失败保留原 profile（复现测试覆盖）。
+- **备份文件权限**：备份目录 0700、DB/manifest 0600（`library.rs::restrict_owner_permissions`），防多用户本机与同步盘默认可读。
+- **library-root 迁移失败回滚**：目录拷贝或 `set_setting` 失败时清除新根残留（`validate_new_root` 保证其为空），不再留下孤儿半份拷贝或阻塞重试。
+- `scripts/v31_acceptance.sh`：pre-migration backup 断言仅在真实发生 v2→v3 迁移时执行（已 v3 的重跑 SKIP，不再误报 FAIL）。
+- **runtime lock 线程内重入计数**：嵌套持锁调用（`import_scan_skills` → `import_skill` 等）的内层 lease 释放不再提前清除持有标记（深度计数），修复同批操作被误判 `runtime is busy` 的缺陷（`tests/scan_adopt.rs` 回归）。
+
+### Security
+
+- `docs/SECURITY.md` 新增 §3.6（诊断导出脱敏边界）、§3.7（备份/恢复能力与残余风险）、§3.8（跨进程互斥范围与已知限制）。
+
+## 0.5.0 — 2026-10-28
+
+### Added
+
+- **跨进程运行时锁**（借鉴 juejin-cn/juejin-usage 的 `tud.pid` 互斥思路，独立实现）：新增 `agenthub-core/src/runtime.rs`；GUI 与 CLI 共用数据，修改类操作（apply / rollback / backup / restore）全程持有 `<data_dir>/runtime.lock`（flock，进程死亡自动释放、无陈旧锁），忙时另一进程得到 `Blocked` 错误并指明持有者（kind + pid）；只读操作不受影响。测试含**真实跨进程竞争**（self-exec 生成独立持有进程）。
+- **MCP headers 入 Keychain（0.5.0 安全修复）**：headers 值不再明文入库——DB 行只存 header 名（值置空），值存 `com.agenthub.mcp` Keychain（`server/header/<name>`）；分发计划 payload 剥离 headers，执行时与 env 一同从 Keychain 重建；`list_servers` 自动迁移 0.4 存量明文行；MCP 视图返回掩码值并在缺失时给出 issue。测试 `tests/mcp.rs` 新增 1 个。
+- **Keychain 写入不经 argv**：`set_secret` 默认走 `security -i` stdin 模式，secret 不出现在进程参数（含引号/反斜杠/换行的值回退 argv，已在 docs/SECURITY.md R3 声明）。
+- **CLI `diagnostics` 诊断导出**：`agenthub diagnostics [FILE]` 输出无 secret 的 JSON 报告（doctor 检查、agent 列表、掩码 MCP、dashboard 统计、技能计数），默认写入 `~/Downloads/agenthub-diagnostics-<ts>.json`。
+- **AI 协作仓库工程**（借鉴 juejin-usage 的 AGENTS.md / CONTEXT.md 方法）：新增 `AGENTS.md`（仓库地图 + 硬约束）、`docs/CONTEXT.md`（领域术语表与不变量）、`CONTRIBUTING.md`（分支 / Commit / PR / 工作流规范）。
+- **README 安全说明**新增「数据边界（收集 / 不收集清单）」小节。
+
+### Changed
+
+- `docs/ARCHITECTURE.md` 分层表新增「运行时锁」一行（已验证标记）。
+
 ## 0.4.0 — 2026-10-20
 
 修复用户反馈「技能库始终只有两个，实际本机不同 Agent 安装的技能很多」。把**扫描发现**做成 Skills 页一等公民，并新增批量采纳（central library import）。
