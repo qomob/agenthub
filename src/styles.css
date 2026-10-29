@@ -53,9 +53,10 @@
   --ah-subtle: #8b8f98;
   --ah-line: #e6e7ea;
   --ah-line-strong: #d4d6dc;
-  --ah-accent: #4f46e5;
-  --ah-accent-hover: #4338ca;
-  --ah-accent-soft: rgb(79 70 229 / 0.09);
+  /* Brand accent from assets/logo.svg (#2855e8, lime dot #d7f17a) */
+  --ah-accent: #2855e8;
+  --ah-accent-hover: #1e46c4;
+  --ah-accent-soft: rgb(40 85 232 / 0.09);
   --ah-accent-contrast: #ffffff;
   --ah-success: #15803d;
   --ah-success-soft: rgb(21 128 61 / 0.1);
@@ -84,9 +85,10 @@
   --ah-subtle: #757b85;
   --ah-line: #262b33;
   --ah-line-strong: #363d48;
-  --ah-accent: #818cf8;
-  --ah-accent-hover: #a5b4fc;
-  --ah-accent-soft: rgb(129 140 248 / 0.14);
+  /* Brand accent in dark mode: lightened logo blue for contrast */
+  --ah-accent: #93a9f4;
+  --ah-accent-hover: #b0c1f8;
+  --ah-accent-soft: rgb(147 169 244 / 0.14);
   --ah-accent-contrast: #0e1014;
   --ah-success: #4ade80;
   --ah-success-soft: rgb(74 222 128 / 0.12);
@@ -1966,6 +1968,19 @@ a.stat-card:hover {
   font-size: 14px;
   font-weight: 700;
   letter-spacing: 0.03em;
+  position: relative;
+}
+
+/* Lime dot mirroring assets/logo.svg */
+.brand-mark-lg::after {
+  content: '';
+  position: absolute;
+  right: 5px;
+  bottom: 5px;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #d7f17a;
 }
 
 .splash-title {
