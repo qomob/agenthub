@@ -1,4 +1,4 @@
-# AgentHub · Capability Control Center
+# <img src="assets/logo.svg" alt="AgentHub logo" width="28" align="top"> AgentHub · Capability Control Center
 
 > **当前版本：0.5.0**（2026-10-28，变更明细见 [docs/CHANGELOG.md](docs/CHANGELOG.md)）。License：MIT（见 `LICENSE` 与 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)；源码仓库：https://github.com/qomob/agenthub）。
 

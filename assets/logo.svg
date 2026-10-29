@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title">
+  <title id="title">AgentHub</title>
+  <rect width="64" height="64" rx="13" fill="#2855e8"/>
+  <path fill="#fff" fill-rule="evenodd" d="M18 24c-6 0-10 4.6-10 10.7S12 45 18 45c3 0 5.3-1.2 7-3.3V45h5V25h-5v2.3c-1.7-2.2-4-3.3-7-3.3Zm1 5c3.7 0 6 2.4 6 5.7S22.7 40 19 40s-6-2.2-6-5.3 2.3-5.7 6-5.7Z"/>
+  <path fill="#fff" d="M34 15h5v13c1.4-2.6 3.6-3.9 6.5-3.9 5.3 0 8.5 3.7 8.5 9.6V45h-5V34c0-3.3-1.7-5-4.3-5-3.6 0-5.7 2.1-5.7 5.5V45h-5Z"/>
+  <circle cx="54" cy="52" r="3.5" fill="#d7f17a"/>
+</svg>
