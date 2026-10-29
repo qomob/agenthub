@@ -98,6 +98,16 @@ AGENTHUB_HOME=/tmp/agenthub-gui/home \
 
 > 详细路径/证据见 [docs/ADAPTER-SPEC.md](docs/ADAPTER-SPEC.md) 与 [docs/AGENT-COMPATIBILITY.md](docs/AGENT-COMPATIBILITY.md)。
 
+## 界面截图
+
+| 仪表盘 | 隐私与文件访问（Onboarding 第 1 步） |
+|---|---|
+| ![仪表盘：Agent 登记数、技能、安装数、MCP、最近一次扫描与最近操作](docs/evidence/gui-dashboard-app-only.png) | ![Onboarding：本地优先数据边界说明与只读扫描确认](docs/evidence/gui-onboarding-app-only.png) |
+
+| 健康验证 |
+|---|
+| ![健康验证：已验证需要审计与验证证据，仅安装成功不会自动变成已验证](docs/evidence/gui-health-app-only.png) |
+
 ## 技能库：扫描发现 → 批量入库（0.4.0）
 
 此前 Skills 页只显示「已导入中央库」的能力，本机各 Agent 目录里已有的技能看不到。0.4.0 将扫描发现做成一等公民：

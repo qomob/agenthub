@@ -46,6 +46,9 @@ coverage/
 /docs/AGENT-COMPATIBILITY.md
 /docs/compat-evidence/
 /docs/evidence/
+!/docs/evidence/gui-dashboard-app-only.png
+!/docs/evidence/gui-health-app-only.png
+!/docs/evidence/gui-onboarding-app-only.png
 /docs/handoffs/
 
 # landing 部署工具本地配置
