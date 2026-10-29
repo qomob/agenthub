@@ -50,3 +50,4 @@ coverage/
 
 # landing 部署工具本地配置
 landing/.openai/
+landing/dist/
