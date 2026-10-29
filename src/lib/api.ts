@@ -36,6 +36,7 @@ import type {
   ProfileUpsertRequest,
   ProfileView,
   RecoveryReport,
+  RestoreResult,
   ScanImportRequest,
   ScanImportResult,
   ScanReport,
@@ -252,6 +253,8 @@ export const api = {
     }),
   backupsCreate: () => call<BackupResult>('backups_create'),
   backupsList: () => call<BackupView[]>('backups_list'),
+  backupsRestore: (backupId: string) =>
+    callApi<RestoreResult>('backups_restore', { backup_id: backupId }),
 
   // MCP
   mcpList: () => call<McpServerView[]>('mcp_list'),

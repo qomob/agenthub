@@ -758,6 +758,15 @@ export interface BackupView {
   sizeBytes: number
 }
 
+export interface RestoreResult {
+  backupId: string
+  restoredAt: string
+  safetyBackupId: string
+  schemaVersion: number
+  integrityOk: boolean
+  capabilityCount: number
+}
+
 export interface Bootstrap {
   settings: AppSettings
   agents: AgentView[]

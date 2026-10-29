@@ -323,10 +323,10 @@ async function finish(): Promise<void> {
             <article v-for="agent in agents" :key="agent.id" class="card">
               <div class="card-body stack-sm">
                 <div class="agent-card-header">
-                  <div class="row">
+                  <div class="row" style="min-width: 0">
                     <div class="agent-avatar" aria-hidden="true">{{ agent.name.slice(0, 2) }}</div>
-                    <div>
-                      <p style="font-weight: 600">{{ agent.name }}</p>
+                    <div style="min-width: 0">
+                      <p style="font-weight: 600" :title="agent.name">{{ agent.name }}</p>
                       <p class="hint">{{ agent.vendor }}</p>
                     </div>
                   </div>

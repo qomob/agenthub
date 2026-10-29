@@ -26,7 +26,7 @@ import {
   installationStateKey,
 } from '../lib/status'
 import { canRecoverOperation, hasManualRecovery } from '../lib/v31'
-import type { OperationView, RecoveryReport } from '../lib/types'
+import type { BackupView, OperationView, RecoveryReport } from '../lib/types'
 import { useAppStore } from '../stores/app'
 import { useOperationsStore } from '../stores/operations'
 import { useSkillsStore } from '../stores/skills'
@@ -54,6 +54,9 @@ const rollbackTarget = ref<OperationView | null>(null)
 const rollingBack = ref(false)
 const rollbackError = ref<string | null>(null)
 const backupBusy = ref(false)
+const restoreTarget = ref<BackupView | null>(null)
+const restoring = ref(false)
+const restoreError = ref<string | null>(null)
 
 // v3.1 recovery: only ever started by an explicit user click.
 const recoverTarget = ref<OperationView | null>(null)
@@ -226,6 +229,33 @@ async function createBackup(): Promise<void> {
     ui.notifyError(t('errors.backupFailed'), normalizeError(err))
   } finally {
     backupBusy.value = false
+  }
+}
+
+function requestRestore(backup: BackupView): void {
+  restoreError.value = null
+  restoreTarget.value = backup
+}
+
+async function confirmRestore(): Promise<void> {
+  const backup = restoreTarget.value
+  if (!backup) return
+  restoring.value = true
+  restoreError.value = null
+  try {
+    const result = await store.restoreBackup(backup.id)
+    restoreTarget.value = null
+    ui.notify('success', t('activity.restoreDone', { id: result.backupId, safety: result.safetyBackupId }))
+    await Promise.allSettled([
+      skillsStore.refresh(),
+      app.refreshAgents(),
+      app.loadDashboard(true),
+    ])
+  } catch (err) {
+    restoreError.value = normalizeError(err, t('errors.restoreFailed'))
+    ui.notifyError(t('errors.restoreFailed'), restoreError.value)
+  } finally {
+    restoring.value = false
   }
 }
 
@@ -501,6 +531,7 @@ function doctorTone(ok: boolean): 'success' | 'warn' {
                   <th scope="col">{{ t('activity.backupPathLabel') }}</th>
                   <th scope="col" style="text-align: right">{{ t('activity.size') }}</th>
                   <th scope="col">{{ t('activity.createdAt') }}</th>
+                  <th scope="col" style="text-align: right">{{ t('common.actions') }}</th>
                 </tr>
               </thead>
               <tbody>
@@ -508,6 +539,12 @@ function doctorTone(ok: boolean): 'success' | 'warn' {
                   <td class="path-text">{{ backup.path }}</td>
                   <td class="num" style="text-align: right">{{ formatBytes(backup.sizeBytes) }}</td>
                   <td class="text-xs">{{ formatDateTime(backup.createdAt, locale) }}</td>
+                  <td style="text-align: right">
+                    <button type="button" class="btn btn-sm btn-ghost" @click="requestRestore(backup)">
+                      <Icon name="database" :size="12" />
+                      {{ t('activity.restoreBackup') }}
+                    </button>
+                  </td>
                 </tr>
               </tbody>
             </table>
@@ -843,6 +880,17 @@ function doctorTone(ok: boolean): 'success' | 'warn' {
       :busy="recovering"
       @cancel="recoverTarget = null"
       @confirm="confirmRecover"
+    />
+
+    <ConfirmDialog
+      v-if="restoreTarget"
+      :title="t('activity.restoreTitle')"
+      :message="t('activity.restoreBody', { id: restoreTarget.id })"
+      :confirm-label="t('activity.restoreConfirm')"
+      danger
+      :busy="restoring"
+      @cancel="restoreTarget = null"
+      @confirm="confirmRestore"
     />
 
     <BaseModal

@@ -413,11 +413,16 @@
 
 .stack-sm {
   display: grid;
+  /* minmax(0, 1fr): without an explicit track, the implicit auto column sizes
+     to max-content, so one long non-wrapping child (path chip, badge) widens
+     the whole stack beyond its card and defeats every max-width inside. */
+  grid-template-columns: minmax(0, 1fr);
   gap: 8px;
 }
 
 .stack-md {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 12px;
 }
 
@@ -429,6 +434,16 @@
 
 .row-wrap {
   flex-wrap: wrap;
+}
+
+/* Badges with long labels (paths, version strings) must shrink inside the
+   card instead of pushing past its border. */
+.row-wrap .badge,
+.row-wrap .chip {
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .spacer {
@@ -495,8 +510,21 @@
 
 .grid-cards {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(310px, 1fr));
+  /* min(310px, 100%) keeps the track from exceeding the container when a card
+     contains long non-wrapping content (path chips, badges); grid tracks
+     otherwise size to min-content and overflow the viewport. */
+  grid-template-columns: repeat(auto-fill, minmax(min(310px, 100%), 1fr));
   gap: 12px;
+}
+
+/* Grid/flex items default to min-width:auto, which lets long mono-spaced
+   path chips and wide badges push past the card border. */
+.grid-cards > * {
+  min-width: 0;
+}
+
+.grid-cards .card-body {
+  overflow-wrap: anywhere;
 }
 
 @media (max-width: 1120px) {
@@ -2015,6 +2043,21 @@ a.stat-card:hover {
   align-items: flex-start;
   justify-content: space-between;
   gap: 10px;
+}
+
+/* Let the title block shrink so the status badge stays inside the card. */
+.agent-card-header > .row {
+  min-width: 0;
+}
+
+.agent-card-header > .row > div {
+  min-width: 0;
+}
+
+.agent-card-header > .row p {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .agent-avatar {

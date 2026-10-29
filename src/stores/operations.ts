@@ -10,6 +10,7 @@ import type {
   OperationResult,
   OperationView,
   RecoveryReport,
+  RestoreResult,
   SnapshotView,
 } from '../lib/types'
 
@@ -104,6 +105,12 @@ export const useOperationsStore = defineStore('operations', () => {
     return result
   }
 
+  async function restoreBackup(backupId: string): Promise<RestoreResult> {
+    const result = await api.backupsRestore(backupId)
+    await loadBackups().catch(() => undefined)
+    return result
+  }
+
   async function loadDoctor(): Promise<DoctorReport> {
     doctorLoading.value = true
     doctorError.value = null
@@ -156,6 +163,7 @@ export const useOperationsStore = defineStore('operations', () => {
     loadSnapshots,
     loadBackups,
     createBackup,
+    restoreBackup,
     loadDoctor,
     loadChanges,
   }
