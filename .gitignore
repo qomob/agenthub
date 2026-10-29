@@ -45,7 +45,8 @@ coverage/
 /docs/ACCEPTANCE-REPORT.md
 /docs/AGENT-COMPATIBILITY.md
 /docs/compat-evidence/
-/docs/evidence/
+# README 界面截图白名单（其余证据保持本地）
+/docs/evidence/*
 !/docs/evidence/gui-dashboard-app-only.png
 !/docs/evidence/gui-health-app-only.png
 !/docs/evidence/gui-onboarding-app-only.png
