@@ -316,6 +316,69 @@ INSERT OR IGNORE INTO schema_migrations(version, checksum, applied_at)
   VALUES (3, 'v31-safety-v1', datetime('now'));
 "#;
 
+/// SCHEMA_V4 (My AI Stack, additive-only). Detection facts and subscription
+/// facts live in separate tables; subscription FKs never move on merge
+/// (`stack_items.merged_into` is the only merge mechanism). Detections are
+/// keyed by global-unique `adapter_key` and UPSERTed on refresh so row
+/// identity is stable (P0-3). Amounts are integer minor units.
+const SCHEMA_V4: &str = r#"
+CREATE TABLE IF NOT EXISTS stack_items (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  vendor TEXT,
+  source TEXT NOT NULL CHECK (source IN ('detected','manual')),
+  detection_state TEXT NOT NULL DEFAULT 'unknown'
+    CHECK (detection_state IN ('installed','not_installed','unknown')),
+  confirmed INTEGER NOT NULL DEFAULT 0,
+  last_confirmed_at TEXT,
+  merged_into TEXT REFERENCES stack_items(id) ON DELETE SET NULL,
+  overlap_group TEXT,
+  notes TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_stack_items_merged ON stack_items(merged_into);
+CREATE INDEX IF NOT EXISTS idx_stack_items_group ON stack_items(overlap_group);
+
+CREATE TABLE IF NOT EXISTS stack_detections (
+  id TEXT PRIMARY KEY,
+  stack_item_id TEXT NOT NULL REFERENCES stack_items(id) ON DELETE CASCADE,
+  adapter_key TEXT NOT NULL,
+  agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+  detected_status TEXT NOT NULL,
+  evidence_json TEXT NOT NULL DEFAULT '[]',
+  detected_at TEXT NOT NULL,
+  UNIQUE (adapter_key)
+);
+CREATE INDEX IF NOT EXISTS idx_stack_detections_item ON stack_detections(stack_item_id);
+
+CREATE TABLE IF NOT EXISTS subscription_records (
+  id TEXT PRIMARY KEY,
+  stack_item_id TEXT NOT NULL REFERENCES stack_items(id) ON DELETE RESTRICT,
+  product_name TEXT NOT NULL,
+  vendor TEXT,
+  plan_name TEXT,
+  billing_type TEXT NOT NULL CHECK (billing_type IN ('free','subscription','usage','hybrid','unknown')),
+  amount_minor INTEGER,
+  currency TEXT,
+  billing_period TEXT CHECK (billing_period IN ('monthly','quarterly','semiannual','yearly','usage','unknown')),
+  started_on TEXT,
+  renews_on TEXT,
+  status TEXT NOT NULL CHECK (status IN ('active','paused','cancelled','expired','unknown')),
+  notes TEXT,
+  info_source TEXT,
+  last_confirmed_at TEXT,
+  superseded_by TEXT REFERENCES subscription_records(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_subscriptions_item ON subscription_records(stack_item_id);
+CREATE INDEX IF NOT EXISTS idx_subscriptions_status ON subscription_records(status);
+
+INSERT OR IGNORE INTO schema_migrations(version, checksum, applied_at)
+  VALUES (4, 'my-ai-stack-v1', datetime('now'));
+"#;
+
 /// `operations` columns added by v3. `ALTER TABLE ADD COLUMN` is not
 /// idempotent, so each is applied only when absent (supports downgrade tests
 /// and interrupted migrations).
@@ -647,7 +710,7 @@ impl Database {
             .query_row("PRAGMA user_version", [], |row| row.get(0))?;
         if version < 3 {
             // v3.1 rule: migration must be preceded by a recoverable DB copy.
-            self.backup_before_migration(version)?;
+            self.backup_before_migration(version, 3)?;
             let tx = self.conn.unchecked_transaction()?;
             tx.execute_batch(SCHEMA_V3)?;
             for (column, ddl) in V3_OPERATION_COLUMNS {
@@ -670,13 +733,33 @@ impl Database {
                 )));
             }
         }
+        let version: i64 = self
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if version < 4 {
+            // v3.1 rule: migration must be preceded by a recoverable DB copy
+            // (P0-5). The pre-migration backup is the only sanctioned recovery
+            // path; git-style downgrade of the schema is not supported.
+            self.backup_before_migration(version, 4)?;
+            let tx = self.conn.unchecked_transaction()?;
+            tx.execute_batch(SCHEMA_V4)?;
+            tx.pragma_update(None, "user_version", 4)?;
+            tx.commit()?;
+            let integrity = self.integrity_check()?;
+            if !integrity.ok {
+                return Err(Error::Verification(format!(
+                    "database integrity check failed after v4 migration: {}",
+                    integrity.details.join("; ")
+                )));
+            }
+        }
         Ok(())
     }
 
     /// Best-effort but mandatory-before-migration snapshot. The backup lives in
     /// `<data>/backups/pre-migration-v<from>-<timestamp>/` and includes a
     /// manifest with the source/target schema version and sha256.
-    fn backup_before_migration(&self, from_version: i64) -> Result<PathBuf> {
+    fn backup_before_migration(&self, from_version: i64, to_version: i64) -> Result<PathBuf> {
         if self.path == Path::new(":memory:") {
             return Ok(PathBuf::new());
         }
@@ -702,7 +785,7 @@ impl Database {
         let manifest = serde_json::json!({
             "kind": "pre-migration-backup",
             "from_version": from_version,
-            "to_version": 3,
+            "to_version": to_version,
             "created_at": crate::util::now(),
             "database": target.to_string_lossy(),
             "sha256": sha256,
@@ -1801,6 +1884,30 @@ impl Database {
         Ok(())
     }
 
+    /// Read audit events newest-first, newest `limit` records. Used by the My
+    /// AI Stack tests and later by the audit trail UI.
+    pub fn list_audit_events(&self, limit: usize) -> Result<Vec<AuditEventRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, actor, event_key, operation_id, event_json_redacted, occurred_at
+             FROM audit_events ORDER BY occurred_at DESC, id DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |row| {
+            Ok(AuditEventRow {
+                id: row.get(0)?,
+                actor: row.get(1)?,
+                event_key: row.get(2)?,
+                operation_id: row.get(3)?,
+                event_json_redacted: row.get(4)?,
+                occurred_at: row.get(5)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     // -- snapshots ---------------------------------------------------------
 
     pub fn insert_snapshot(&self, row: &SnapshotRow) -> Result<()> {
@@ -2328,6 +2435,453 @@ impl Database {
                 detected_at: row.get(5)?,
             })
         })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// My AI Stack (M1-A): stack_items / stack_detections / subscription_records.
+// Storage structs are snake_case column mirrors; views live in `model.rs`.
+// ---------------------------------------------------------------------------
+
+/// One row of the `audit_events` table (D-1 audit trail carrier).
+#[derive(Debug, Clone)]
+pub struct AuditEventRow {
+    pub id: String,
+    pub actor: String,
+    pub event_key: String,
+    pub operation_id: Option<String>,
+    pub event_json_redacted: String,
+    pub occurred_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct StackItemRow {
+    pub id: String,
+    pub name: String,
+    pub vendor: Option<String>,
+    pub source: String,
+    pub detection_state: String,
+    pub confirmed: bool,
+    pub last_confirmed_at: Option<String>,
+    pub merged_into: Option<String>,
+    pub overlap_group: Option<String>,
+    pub notes: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct StackDetectionRow {
+    pub id: String,
+    pub stack_item_id: String,
+    pub adapter_key: String,
+    pub agent_id: Option<String>,
+    pub detected_status: String,
+    pub evidence_json: String,
+    pub detected_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SubscriptionRow {
+    pub id: String,
+    pub stack_item_id: String,
+    pub product_name: String,
+    pub vendor: Option<String>,
+    pub plan_name: Option<String>,
+    pub billing_type: String,
+    pub amount_minor: Option<i64>,
+    pub currency: Option<String>,
+    pub billing_period: Option<String>,
+    pub started_on: Option<String>,
+    pub renews_on: Option<String>,
+    pub status: String,
+    pub notes: Option<String>,
+    pub info_source: Option<String>,
+    pub last_confirmed_at: Option<String>,
+    pub superseded_by: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+const STACK_ITEM_COLUMNS: &str = "id, name, vendor, source, detection_state, confirmed, last_confirmed_at, merged_into, overlap_group, notes, created_at, updated_at";
+
+/// Shared SQL for the refresh transaction and the standalone accessors, so
+/// the two paths can never drift.
+const SQL_INSERT_STACK_ITEM: &str =
+    "INSERT INTO stack_items (id, name, vendor, source, detection_state, confirmed, last_confirmed_at, merged_into, overlap_group, notes, created_at, updated_at)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)";
+const SQL_UPSERT_STACK_DETECTION: &str =
+    "INSERT INTO stack_detections (id, stack_item_id, adapter_key, agent_id, detected_status, evidence_json, detected_at)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+     ON CONFLICT(adapter_key) DO UPDATE SET
+       stack_item_id = excluded.stack_item_id,
+       agent_id = excluded.agent_id,
+       detected_status = excluded.detected_status,
+       evidence_json = excluded.evidence_json,
+       detected_at = excluded.detected_at";
+const SQL_SET_STACK_ITEM_DETECTION_STATE: &str =
+    "UPDATE stack_items SET detection_state = ?2, updated_at = ?3 WHERE id = ?1";
+
+/// One detection-refresh write plan applied atomically (frozen I2a rule:
+/// refresh runs inside a single transaction).
+pub struct StackRefreshPlan {
+    pub item_inserts: Vec<StackItemRow>,
+    pub detection_upserts: Vec<StackDetectionRow>,
+    /// Detection-state re-derivations for existing items (id, state).
+    pub state_updates: Vec<(String, String)>,
+}
+
+impl Database {
+    /// Applies the refresh plan inside one transaction. Called by
+    /// `AgentHub::stack_refresh_detections` only.
+    pub fn apply_stack_refresh(&self, plan: &StackRefreshPlan) -> Result<()> {
+        let now = crate::util::now();
+        let tx = self.conn.unchecked_transaction()?;
+        for item in &plan.item_inserts {
+            tx.execute(
+                SQL_INSERT_STACK_ITEM,
+                params![
+                    item.id,
+                    item.name,
+                    item.vendor,
+                    item.source,
+                    item.detection_state,
+                    item.confirmed as i64,
+                    item.last_confirmed_at,
+                    item.merged_into,
+                    item.overlap_group,
+                    item.notes,
+                    item.created_at,
+                    item.updated_at,
+                ],
+            )?;
+        }
+        for detection in &plan.detection_upserts {
+            tx.execute(
+                SQL_UPSERT_STACK_DETECTION,
+                params![
+                    detection.id,
+                    detection.stack_item_id,
+                    detection.adapter_key,
+                    detection.agent_id,
+                    detection.detected_status,
+                    detection.evidence_json,
+                    detection.detected_at,
+                ],
+            )?;
+        }
+        for (id, state) in &plan.state_updates {
+            tx.execute(SQL_SET_STACK_ITEM_DETECTION_STATE, params![id, state, now])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+    fn stack_item_from_row(&self, row: &rusqlite::Row<'_>) -> rusqlite::Result<StackItemRow> {
+        Ok(StackItemRow {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            vendor: row.get(2)?,
+            source: row.get(3)?,
+            detection_state: row.get(4)?,
+            confirmed: row.get::<_, i64>(5)? != 0,
+            last_confirmed_at: row.get(6)?,
+            merged_into: row.get(7)?,
+            overlap_group: row.get(8)?,
+            notes: row.get(9)?,
+            created_at: row.get(10)?,
+            updated_at: row.get(11)?,
+        })
+    }
+
+    pub fn insert_stack_item(&self, item: &StackItemRow) -> Result<()> {
+        self.conn.execute(
+            SQL_INSERT_STACK_ITEM,
+            params![
+                item.id,
+                item.name,
+                item.vendor,
+                item.source,
+                item.detection_state,
+                item.confirmed as i64,
+                item.last_confirmed_at,
+                item.merged_into,
+                item.overlap_group,
+                item.notes,
+                item.created_at,
+                item.updated_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// User-editable fields only: source, detection_state and confirmed are
+    /// system-owned and never written here.
+    pub fn update_stack_item_fields(
+        &self,
+        id: &str,
+        name: &str,
+        vendor: Option<&str>,
+        overlap_group: Option<&str>,
+        notes: Option<&str>,
+    ) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE stack_items SET name = ?2, vendor = ?3, overlap_group = ?4, notes = ?5, updated_at = ?6 WHERE id = ?1",
+            params![id, name, vendor, overlap_group, notes, crate::util::now()],
+        )?;
+        Ok(changed > 0)
+    }
+
+    pub fn set_stack_item_confirmed(&self, id: &str, confirmed_at: &str) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE stack_items SET confirmed = 1, last_confirmed_at = ?2, updated_at = ?2 WHERE id = ?1",
+            params![id, confirmed_at],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Merge/unmerge: the single, reversible mechanism. Subscription FKs never
+    /// move (P0-2).
+    pub fn set_stack_item_merged_into(&self, id: &str, target: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE stack_items SET merged_into = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, target, crate::util::now()],
+        )?;
+        Ok(())
+    }
+
+    /// System-owned detection state re-derivation during refresh.
+    pub fn set_stack_item_detection_state(&self, id: &str, state: &str) -> Result<()> {
+        self.conn.execute(
+            SQL_SET_STACK_ITEM_DETECTION_STATE,
+            params![id, state, crate::util::now()],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_stack_item(&self, id: &str) -> Result<bool> {
+        let changed = self.conn.execute("DELETE FROM stack_items WHERE id = ?1", params![id])?;
+        Ok(changed > 0)
+    }
+
+    pub fn get_stack_item(&self, id: &str) -> Result<Option<StackItemRow>> {
+        let sql = format!("SELECT {STACK_ITEM_COLUMNS} FROM stack_items WHERE id = ?1");
+        Ok(self
+            .conn
+            .query_row(&sql, params![id], |row| self.stack_item_from_row(row))
+            .optional()?)
+    }
+
+    pub fn list_stack_items(&self) -> Result<Vec<StackItemRow>> {
+        let sql = format!(
+            "SELECT {STACK_ITEM_COLUMNS} FROM stack_items ORDER BY created_at ASC, id ASC"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map([], |row| self.stack_item_from_row(row))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    pub fn count_stack_item_children(&self, id: &str) -> Result<i64> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM stack_items WHERE merged_into = ?1",
+                params![id],
+                |row| row.get(0),
+            )?)
+    }
+
+    pub fn count_subscriptions_for_item(&self, id: &str) -> Result<i64> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM subscription_records WHERE stack_item_id = ?1",
+                params![id],
+                |row| row.get(0),
+            )?)
+    }
+
+    fn detection_from_row(&self, row: &rusqlite::Row<'_>) -> rusqlite::Result<StackDetectionRow> {
+        Ok(StackDetectionRow {
+            id: row.get(0)?,
+            stack_item_id: row.get(1)?,
+            adapter_key: row.get(2)?,
+            agent_id: row.get(3)?,
+            detected_status: row.get(4)?,
+            evidence_json: row.get(5)?,
+            detected_at: row.get(6)?,
+        })
+    }
+
+    /// Stable-identity upsert keyed by the globally unique adapter_key
+    /// (P0-3/I2a). On conflict only the attach target, agent link, observed
+    /// status and evidence are refreshed; row id and detected row identity
+    /// stay stable across refreshes.
+    pub fn upsert_stack_detection(&self, detection: &StackDetectionRow) -> Result<()> {
+        self.conn.execute(
+            SQL_UPSERT_STACK_DETECTION,
+            params![
+                detection.id,
+                detection.stack_item_id,
+                detection.adapter_key,
+                detection.agent_id,
+                detection.detected_status,
+                detection.evidence_json,
+                detection.detected_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_stack_detection_by_adapter(&self, adapter_key: &str) -> Result<Option<StackDetectionRow>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id, stack_item_id, adapter_key, agent_id, detected_status, evidence_json, detected_at
+                 FROM stack_detections WHERE adapter_key = ?1",
+                params![adapter_key],
+                |row| self.detection_from_row(row),
+            )
+            .optional()?)
+    }
+
+    pub fn list_stack_detections(&self) -> Result<Vec<StackDetectionRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, stack_item_id, adapter_key, agent_id, detected_status, evidence_json, detected_at
+             FROM stack_detections ORDER BY adapter_key ASC",
+        )?;
+        let rows = stmt.query_map([], |row| self.detection_from_row(row))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    pub fn list_stack_detections_for_item(&self, stack_item_id: &str) -> Result<Vec<StackDetectionRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, stack_item_id, adapter_key, agent_id, detected_status, evidence_json, detected_at
+             FROM stack_detections WHERE stack_item_id = ?1 ORDER BY adapter_key ASC",
+        )?;
+        let rows = stmt.query_map(params![stack_item_id], |row| self.detection_from_row(row))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    fn subscription_from_row(&self, row: &rusqlite::Row<'_>) -> rusqlite::Result<SubscriptionRow> {
+        Ok(SubscriptionRow {
+            id: row.get(0)?,
+            stack_item_id: row.get(1)?,
+            product_name: row.get(2)?,
+            vendor: row.get(3)?,
+            plan_name: row.get(4)?,
+            billing_type: row.get(5)?,
+            amount_minor: row.get(6)?,
+            currency: row.get(7)?,
+            billing_period: row.get(8)?,
+            started_on: row.get(9)?,
+            renews_on: row.get(10)?,
+            status: row.get(11)?,
+            notes: row.get(12)?,
+            info_source: row.get(13)?,
+            last_confirmed_at: row.get(14)?,
+            superseded_by: row.get(15)?,
+            created_at: row.get(16)?,
+            updated_at: row.get(17)?,
+        })
+    }
+
+    pub fn insert_subscription(&self, sub: &SubscriptionRow) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO subscription_records (id, stack_item_id, product_name, vendor, plan_name, billing_type, amount_minor, currency, billing_period, started_on, renews_on, status, notes, info_source, last_confirmed_at, superseded_by, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+            params![
+                sub.id,
+                sub.stack_item_id,
+                sub.product_name,
+                sub.vendor,
+                sub.plan_name,
+                sub.billing_type,
+                sub.amount_minor,
+                sub.currency,
+                sub.billing_period,
+                sub.started_on,
+                sub.renews_on,
+                sub.status,
+                sub.notes,
+                sub.info_source,
+                sub.last_confirmed_at,
+                sub.superseded_by,
+                sub.created_at,
+                sub.updated_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Business-column update; created_at is preserved. superseded_by is
+    /// system-owned (M2 change chain) and never written here.
+    pub fn update_subscription(&self, sub: &SubscriptionRow) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE subscription_records SET stack_item_id = ?2, product_name = ?3, vendor = ?4, plan_name = ?5, billing_type = ?6, amount_minor = ?7, currency = ?8, billing_period = ?9, started_on = ?10, renews_on = ?11, status = ?12, notes = ?13, info_source = ?14, last_confirmed_at = ?15, updated_at = ?16 WHERE id = ?1",
+            params![
+                sub.id,
+                sub.stack_item_id,
+                sub.product_name,
+                sub.vendor,
+                sub.plan_name,
+                sub.billing_type,
+                sub.amount_minor,
+                sub.currency,
+                sub.billing_period,
+                sub.started_on,
+                sub.renews_on,
+                sub.status,
+                sub.notes,
+                sub.info_source,
+                sub.last_confirmed_at,
+                sub.updated_at,
+            ],
+        )?;
+        Ok(changed > 0)
+    }
+
+    pub fn delete_subscription(&self, id: &str) -> Result<bool> {
+        let changed =
+            self.conn
+                .execute("DELETE FROM subscription_records WHERE id = ?1", params![id])?;
+        Ok(changed > 0)
+    }
+
+    pub fn get_subscription(&self, id: &str) -> Result<Option<SubscriptionRow>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id, stack_item_id, product_name, vendor, plan_name, billing_type, amount_minor, currency, billing_period, started_on, renews_on, status, notes, info_source, last_confirmed_at, superseded_by, created_at, updated_at
+                 FROM subscription_records WHERE id = ?1",
+                params![id],
+                |row| self.subscription_from_row(row),
+            )
+            .optional()?)
+    }
+
+    pub fn list_subscriptions(&self) -> Result<Vec<SubscriptionRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, stack_item_id, product_name, vendor, plan_name, billing_type, amount_minor, currency, billing_period, started_on, renews_on, status, notes, info_source, last_confirmed_at, superseded_by, created_at, updated_at
+             FROM subscription_records ORDER BY created_at ASC, id ASC",
+        )?;
+        let rows = stmt.query_map([], |row| self.subscription_from_row(row))?;
         let mut out = Vec::new();
         for row in rows {
             out.push(row?);

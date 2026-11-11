@@ -16,6 +16,9 @@ pub fn request_id() -> String {
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ErrorCode {
     InvalidInput,
+    /// D-2: the resource exists but the requested state change is not allowed
+    /// (My AI Stack module). Exits 4 like PLAN_STALE but is a distinct code.
+    ResourceConflict,
     UnsupportedCapability,
     UnverifiedAdapter,
     PermissionDenied,
@@ -40,6 +43,7 @@ impl ErrorCode {
     pub fn as_str(self) -> &'static str {
         match self {
             ErrorCode::InvalidInput => "INVALID_INPUT",
+            ErrorCode::ResourceConflict => "RESOURCE_CONFLICT",
             ErrorCode::UnsupportedCapability => "UNSUPPORTED_CAPABILITY",
             ErrorCode::UnverifiedAdapter => "UNVERIFIED_ADAPTER",
             ErrorCode::PermissionDenied => "PERMISSION_DENIED",
@@ -71,7 +75,7 @@ impl ErrorCode {
             | ErrorCode::PathEscape
             | ErrorCode::InvalidSkill
             | ErrorCode::McpVersionMismatch => 3,
-            ErrorCode::PlanStale => 4,
+            ErrorCode::PlanStale | ErrorCode::ResourceConflict => 4,
             ErrorCode::ExternalModification
             | ErrorCode::RollbackBlocked
             | ErrorCode::SecretLocked
@@ -102,6 +106,8 @@ impl From<&Error> for ErrorCode {
             Error::Toml(_) => ErrorCode::InvalidInput,
             Error::Zip(_) => ErrorCode::InvalidSkill,
             Error::InvalidSkill(_) => ErrorCode::InvalidSkill,
+            Error::InvalidInput(_) => ErrorCode::InvalidInput,
+            Error::ResourceConflict(_) => ErrorCode::ResourceConflict,
             Error::Conflict(_) => ErrorCode::PlanStale,
             Error::NotFound(_) => ErrorCode::InvalidInput,
             Error::Unsupported(_) => ErrorCode::UnsupportedCapability,

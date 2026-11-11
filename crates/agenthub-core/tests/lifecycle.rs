@@ -53,7 +53,9 @@ fn fresh_home_initialises_library_profiles_and_migrations() {
         .conn()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .expect("read user_version");
-    assert_eq!(schema_version, 3);
+    // SCHEMA_V4 ("my-ai-stack-v1") shipped with My AI Stack; the pin moves
+    // with the schema, not with the binary.
+    assert_eq!(schema_version, 4);
 
     drop(hub);
 
@@ -66,7 +68,7 @@ fn fresh_home_initialises_library_profiles_and_migrations() {
         .conn()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .expect("read user_version");
-    assert_eq!(schema_version, 3, "migrations must be idempotent");
+    assert_eq!(schema_version, 4, "migrations must be idempotent");
 }
 
 #[test]

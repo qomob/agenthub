@@ -20,6 +20,17 @@ pub enum Error {
     Zip(String),
     #[error("invalid skill: {0}")]
     InvalidSkill(String),
+    /// A user-supplied parameter failed validation or refers to a non-existent
+    /// entity (My AI Stack module; D-2). Kept distinct from `InvalidSkill`,
+    /// which carries the legacy INVALID_SKILL semantics for skill imports.
+    #[error("invalid input: {0}")]
+    InvalidInput(String),
+    /// The target resource exists, but the requested state change is not
+    /// allowed in its current state — e.g. deleting a stack item that still
+    /// holds subscription records, or merging an already-merged item (D-2).
+    /// Distinct from `Conflict`, which means a stale operation plan.
+    #[error("resource conflict: {0}")]
+    ResourceConflict(String),
     #[error("conflict: {0}")]
     Conflict(String),
     #[error("not found: {0}")]
@@ -43,6 +54,19 @@ impl Error {
 
     pub fn invalid(message: impl Into<String>) -> Self {
         Error::InvalidSkill(message.into())
+    }
+
+    /// D-2: parameter-level validation failure (maps to INVALID_INPUT).
+    /// Note: `invalid()` deliberately maps to InvalidSkill for legacy
+    /// compatibility; new My AI Stack code must use this constructor instead.
+    pub fn invalid_input(message: impl Into<String>) -> Self {
+        Error::InvalidInput(message.into())
+    }
+
+    /// D-2: resource exists but the state change is not allowed
+    /// (maps to RESOURCE_CONFLICT / exit code 4).
+    pub fn resource_conflict(message: impl Into<String>) -> Self {
+        Error::ResourceConflict(message.into())
     }
 
     pub fn conflict(message: impl Into<String>) -> Self {

@@ -14,6 +14,7 @@ pub mod error;
 pub mod library;
 pub mod mcp;
 pub mod model;
+pub mod money;
 pub mod ops;
 pub mod redact;
 pub mod runtime;

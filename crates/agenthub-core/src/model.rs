@@ -1504,3 +1504,261 @@ pub struct ScanImportResult {
     pub total_candidates: usize,
     pub finished_at: String,
 }
+
+// ---------------------------------------------------------------------------
+// My AI Stack (M1-A): stack items, detections and subscription records.
+// Views are camelCase per the v3.1 API contract; storage column names are
+// snake_case and mapped explicitly in `db.rs`.
+// ---------------------------------------------------------------------------
+
+/// Detection lifecycle states derived from stack detections (DATA_MODEL §5
+/// rules A/B/C). Stored as snake_case strings.
+pub const DETECTION_STATE_INSTALLED: &str = "installed";
+pub const DETECTION_STATE_NOT_INSTALLED: &str = "not_installed";
+pub const DETECTION_STATE_UNKNOWN: &str = "unknown";
+
+/// Billing types (frozen in M0): free | subscription | usage | hybrid | unknown.
+pub const BILLING_TYPES: [&str; 5] = ["free", "subscription", "usage", "hybrid", "unknown"];
+/// Subscription statuses (frozen in M0): active | paused | cancelled | expired | unknown.
+pub const SUBSCRIPTION_STATUSES: [&str; 5] = ["active", "paused", "cancelled", "expired", "unknown"];
+/// Foldable billing periods; `usage` and `unknown` are valid stored values but
+/// never folded into cost aggregates.
+pub const BILLING_PERIODS: [&str; 6] = [
+    "monthly", "quarterly", "semiannual", "yearly", "usage", "unknown",
+];
+
+/// A tool in the user's AI stack: either a manual entry or one created from
+/// local adapter detections. Detection facts and subscription facts live in
+/// separate tables; this view derives the cross-table annotations only.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct StackItemView {
+    pub id: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vendor: Option<String>,
+    /// "detected" (created by stack refresh) or "manual" (created by the user).
+    pub source: String,
+    /// installed | not_installed | unknown — derived from detections only.
+    pub detection_state: String,
+    /// User confirmation flag: true once the user confirmed this entry.
+    pub confirmed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_confirmed_at: Option<String>,
+    /// registered | none — whether the item holds subscription records.
+    pub subscription_state: String,
+    /// Present when this item was merged into another item (idempotent,
+    /// reversible link; subscription FKs never move on merge).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merged_into: Option<String>,
+    /// User-declared near-purpose group for Cost Optimizer R1 (opaque string).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overlap_group: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub detection_count: i64,
+    pub subscription_count: i64,
+}
+
+/// One adapter detection fact attached to a stack item. Rows are keyed by
+/// `adapter_key` (unique) and UPSERTed on refresh, so the row identity is
+/// stable across refreshes (P0-3).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct StackDetectionView {
+    pub id: String,
+    pub stack_item_id: String,
+    pub adapter_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    /// AgentStatus string observed by the adapter ("installed",
+    /// "not_installed", "verification_required", "unsupported", "error").
+    pub detected_status: String,
+    /// Directory/file evidence strings. Quasi-personal data: local database
+    /// only, never echoed to logs or diagnostics.
+    pub evidence: Vec<String>,
+    pub detected_at: String,
+}
+
+/// A subscription/cost record the user registered for a stack item. Amounts
+/// are integer minor units; missing facts stay null (never zero).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SubscriptionView {
+    pub id: String,
+    pub stack_item_id: String,
+    pub product_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vendor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan_name: Option<String>,
+    /// free | subscription | usage | hybrid | unknown
+    pub billing_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub amount_minor: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub currency: Option<String>,
+    /// monthly | quarterly | semiannual | yearly | usage | unknown
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub billing_period: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_on: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub renews_on: Option<String>,
+    /// active | paused | cancelled | expired | unknown
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub info_source: Option<String>,
+    /// System timestamp of the latest user save of this record.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_confirmed_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Stack item plus its detection and subscription facts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StackItemDetail {
+    pub item: StackItemView,
+    pub detections: Vec<StackDetectionView>,
+    pub subscriptions: Vec<SubscriptionView>,
+    /// Items merged into this one (children), folded into the group.
+    pub merged_children: Vec<StackItemView>,
+}
+
+/// User-supplied payload for creating or renaming a stack item. `source` and
+/// `detection_state` are system-owned and never settable here.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StackItemUpsert {
+    /// None = create a manual item; Some = edit an existing item.
+    #[serde(default)]
+    pub id: Option<String>,
+    pub name: String,
+    #[serde(default)]
+    pub vendor: Option<String>,
+    #[serde(default)]
+    pub overlap_group: Option<String>,
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+/// User-supplied payload for registering or updating a subscription record.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubscriptionUpsert {
+    /// None = create; Some = update (id must exist).
+    #[serde(default)]
+    pub id: Option<String>,
+    pub stack_item_id: String,
+    pub product_name: String,
+    #[serde(default)]
+    pub vendor: Option<String>,
+    #[serde(default)]
+    pub plan_name: Option<String>,
+    /// free | subscription | usage | hybrid | unknown
+    pub billing_type: String,
+    #[serde(default)]
+    pub amount_minor: Option<i64>,
+    #[serde(default)]
+    pub currency: Option<String>,
+    #[serde(default)]
+    pub billing_period: Option<String>,
+    /// ISO date `YYYY-MM-DD`.
+    #[serde(default)]
+    pub started_on: Option<String>,
+    /// ISO date `YYYY-MM-DD`.
+    #[serde(default)]
+    pub renews_on: Option<String>,
+    /// active | paused | cancelled | expired | unknown
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub notes: Option<String>,
+    #[serde(default)]
+    pub info_source: Option<String>,
+}
+
+/// Report of one detection refresh run (idempotent by construction).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StackRefreshReport {
+    pub detections_total: usize,
+    /// Items created during this refresh (unconfirmed, source=detected).
+    pub items_created: usize,
+    /// Detections attached to an existing item instead of a new one.
+    pub items_attached: usize,
+    pub ran_at: String,
+}
+
+/// Per-currency cost aggregation. Figures are equivalents, not cash outflow.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CurrencyBreakdown {
+    pub currency: String,
+    /// Sum of monthly equivalents of the group, rounded once from the exact
+    /// annual total (DATA_MODEL §4 aggregation rule).
+    pub monthly_equivalent_minor: i64,
+    /// Exact sum of annual equivalents.
+    pub annual_equivalent_minor: i64,
+    /// Number of active foldable subscriptions in the group.
+    pub subscription_count: i64,
+    /// True when hybrid subscriptions contribute their known fixed fee here.
+    pub hybrid_count: i64,
+}
+
+/// One subscription classified as incomplete for cost purposes, with the
+/// reasons it could not be folded (never guessed away).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IncompleteItem {
+    pub subscription: SubscriptionView,
+    /// Reasons: "amount" | "currency" | "billing_period" | "billing_type"
+    /// | "usage_not_foldable".
+    pub missing: Vec<String>,
+}
+
+/// Status counts over all registered subscriptions.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SubscriptionCounts {
+    pub total: i64,
+    pub active: i64,
+    pub paused: i64,
+    pub cancelled: i64,
+    pub expired: i64,
+    pub unknown: i64,
+}
+
+/// Spending overview (FR-3). All collections are derived on read; missing
+/// information is surfaced, never filled with zeros or guesses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpendingOverview {
+    /// Per-currency equivalent totals. Currencies are never summed together.
+    pub by_currency: Vec<CurrencyBreakdown>,
+    /// Active subscriptions renewing within the window [today, today+N].
+    pub upcoming_renewals: Vec<SubscriptionView>,
+    /// Active subscriptions whose renews_on is unknown.
+    pub renewals_unknown: Vec<SubscriptionView>,
+    /// Active subscriptions whose renews_on is in the past.
+    pub stale_renewals: Vec<SubscriptionView>,
+    /// Active subscriptions with a registered renews_on beyond the window
+    /// (known future renewals; distinct from unknown renewal dates).
+    pub later_renewals: Vec<SubscriptionView>,
+    /// Active subscriptions missing cost facts required for folding.
+    pub incomplete: Vec<IncompleteItem>,
+    /// Usage-billed subscriptions without bill data (not estimated).
+    pub usage_without_bills: Vec<SubscriptionView>,
+    pub counts: SubscriptionCounts,
+    pub generated_at: String,
+    /// Renewal look-ahead window in days (settings-backed from M2-A).
+    pub upcoming_window_days: i64,
+}

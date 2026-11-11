@@ -7,9 +7,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use crate::adapters::{all_adapters, find_adapter, AgentAdapter};
-use crate::db::{AgentRow, Database, InstallationRow, McpRow, ProfileRow};
+use crate::db::{
+    AgentRow, Database, InstallationRow, McpRow, ProfileRow, StackDetectionRow, StackItemRow,
+    StackRefreshPlan, SubscriptionRow,
+};
 use crate::error::{Error, Result};
 use crate::library::{self, Library};
+use crate::money;
 use crate::model::*;
 use crate::ops::{
     approval_expiry_from_now, current_target_hash, plan_digest, Executor, APPROVAL_TTL_MINUTES,
@@ -3348,6 +3352,885 @@ impl AgentHub {
         }
     }
 
+    // ------------------------------------------------------------------
+    // My AI Stack (M1-A): stack items, detections, subscription records.
+    //
+    // These are application-local facts: all writes run under write_lock +
+    // runtime_guard and are recorded in audit_events only (D-1). The ops.rs
+    // Executor and the operations ledger are untouched — they govern real
+    // agent-directory writes, which stack/subscription CRUD never performs.
+    // ------------------------------------------------------------------
+
+    fn subscription_view(row: SubscriptionRow) -> SubscriptionView {
+        SubscriptionView {
+            id: row.id,
+            stack_item_id: row.stack_item_id,
+            product_name: row.product_name,
+            vendor: row.vendor,
+            plan_name: row.plan_name,
+            billing_type: row.billing_type,
+            amount_minor: row.amount_minor,
+            currency: row.currency,
+            billing_period: row.billing_period,
+            started_on: row.started_on,
+            renews_on: row.renews_on,
+            status: row.status,
+            notes: row.notes,
+            info_source: row.info_source,
+            last_confirmed_at: row.last_confirmed_at,
+            superseded_by: row.superseded_by,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+        }
+    }
+
+    fn stack_item_view(
+        row: &StackItemRow,
+        detection_count: i64,
+        subscription_count: i64,
+    ) -> StackItemView {
+        StackItemView {
+            id: row.id.clone(),
+            name: row.name.clone(),
+            vendor: row.vendor.clone(),
+            source: row.source.clone(),
+            detection_state: row.detection_state.clone(),
+            confirmed: row.confirmed,
+            last_confirmed_at: row.last_confirmed_at.clone(),
+            subscription_state: if subscription_count > 0 {
+                "registered".to_string()
+            } else {
+                "none".to_string()
+            },
+            merged_into: row.merged_into.clone(),
+            overlap_group: row.overlap_group.clone(),
+            notes: row.notes.clone(),
+            created_at: row.created_at.clone(),
+            updated_at: row.updated_at.clone(),
+            detection_count,
+            subscription_count,
+        }
+    }
+
+    fn audit_stack(&self, event_key: &str, detail: serde_json::Value) -> Result<()> {
+        self.db.insert_audit_event("agenthub", event_key, None, &detail)
+    }
+
+    /// All stack items with derived detection/subscription counts. Read-only:
+    /// no locks (single-engine contract).
+    pub fn stack_items(&self) -> Result<Vec<StackItemView>> {
+        let items = self.db.list_stack_items()?;
+        let detections = self.db.list_stack_detections()?;
+        let subscriptions = self.db.list_subscriptions()?;
+        let count = |id: &str, rows: &[String]| -> i64 {
+            rows.iter().filter(|other| other.as_str() == id).count() as i64
+        };
+        let detection_ids: Vec<String> =
+            detections.iter().map(|row| row.stack_item_id.clone()).collect();
+        let subscription_ids: Vec<String> =
+            subscriptions.iter().map(|row| row.stack_item_id.clone()).collect();
+        Ok(items
+            .iter()
+            .map(|row| {
+                Self::stack_item_view(
+                    row,
+                    count(&row.id, &detection_ids),
+                    count(&row.id, &subscription_ids),
+                )
+            })
+            .collect())
+    }
+
+    /// One stack item with its detection facts, subscription records and the
+    /// items merged into it (merge-group children).
+    pub fn stack_item_detail(&self, id: &str) -> Result<StackItemDetail> {
+        let row = self
+            .db
+            .get_stack_item(id)?
+            .ok_or_else(|| Error::not_found(format!("stack item {id} does not exist")))?;
+        let detections: Vec<StackDetectionView> = self
+            .db
+            .list_stack_detections_for_item(id)?
+            .into_iter()
+            .map(|row| StackDetectionView {
+                id: row.id,
+                stack_item_id: row.stack_item_id,
+                adapter_key: row.adapter_key,
+                agent_id: row.agent_id,
+                detected_status: row.detected_status,
+                evidence: serde_json::from_str::<Vec<String>>(&row.evidence_json)
+                    .unwrap_or_default(),
+                detected_at: row.detected_at,
+            })
+            .collect();
+        let subscriptions: Vec<SubscriptionView> = self
+            .db
+            .list_subscriptions()?
+            .into_iter()
+            .filter(|row| row.stack_item_id == id)
+            .map(Self::subscription_view)
+            .collect();
+        let merged_children: Vec<StackItemView> = self
+            .stack_items()?
+            .into_iter()
+            .filter(|view| view.merged_into.as_deref() == Some(id))
+            .collect();
+        let subscription_count = subscriptions.len() as i64;
+        let detection_count = detections.len() as i64;
+        Ok(StackItemDetail {
+            item: Self::stack_item_view(&row, detection_count, subscription_count),
+            detections,
+            subscriptions,
+            merged_children,
+        })
+    }
+
+    /// All registered subscription records.
+    pub fn subscriptions(&self) -> Result<Vec<SubscriptionView>> {
+        Ok(self
+            .db
+            .list_subscriptions()?
+            .into_iter()
+            .map(Self::subscription_view)
+            .collect())
+    }
+
+    /// Spending overview with the default renewal look-ahead window.
+    pub fn spending_overview(&self) -> Result<SpendingOverview> {
+        self.spending_overview_with_window(money::DEFAULT_UPCOMING_WINDOW_DAYS)
+    }
+
+    /// Spending overview (FR-3). Read-only. Semantics frozen in M0:
+    ///
+    /// - only `status=active` subscriptions with known amount, currency and a
+    ///   foldable billing period contribute to per-currency equivalents;
+    /// - hybrids contribute their known fixed fee part (UI must label that);
+    /// - missing facts surface as `incomplete` (never filled with zeros);
+    /// - usage-billed subscriptions without bills surface separately and are
+    ///   never estimated;
+    /// - currencies are never summed across codes;
+    /// - renewals are derived from explicitly registered dates only.
+    pub fn spending_overview_with_window(&self, upcoming_window_days: i64) -> Result<SpendingOverview> {
+        if upcoming_window_days < 0 {
+            return Err(Error::invalid_input(
+                "upcoming renewal window must be non-negative",
+            ));
+        }
+        let subscriptions = self.db.list_subscriptions()?;
+        let today = chrono::Local::now().date_naive();
+        let window_end = today
+            .checked_add_signed(chrono::Duration::days(upcoming_window_days))
+            .ok_or_else(|| Error::invalid_input("renewal window overflows the date range"))?;
+
+        let mut counts = SubscriptionCounts::default();
+        counts.total = subscriptions.len() as i64;
+        let mut by_currency: std::collections::BTreeMap<String, Vec<(money::CostLine, bool)>> =
+            std::collections::BTreeMap::new();
+        let mut upcoming = Vec::new();
+        let mut renewals_unknown = Vec::new();
+        let mut stale = Vec::new();
+        let mut later = Vec::new();
+        let mut incomplete: Vec<IncompleteItem> = Vec::new();
+        let mut usage_without_bills = Vec::new();
+
+        for row in subscriptions {
+            let view = Self::subscription_view(row);
+            match view.status.as_str() {
+                "active" => counts.active += 1,
+                "paused" => counts.paused += 1,
+                "cancelled" => counts.cancelled += 1,
+                "expired" => counts.expired += 1,
+                _ => counts.unknown += 1,
+            }
+            if view.status != "active" {
+                continue;
+            }
+            // Renewal classification over active subscriptions.
+            match view.renews_on.as_deref() {
+                Some(date) => {
+                    let parsed = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").ok();
+                    match parsed {
+                        Some(d) if d >= today && d <= window_end => {
+                            upcoming.push(view.clone());
+                        }
+                        Some(d) if d < today => stale.push(view.clone()),
+                        Some(_) => later.push(view.clone()),
+                        None => renewals_unknown.push(view.clone()),
+                    }
+                }
+                None => renewals_unknown.push(view.clone()),
+            }
+            // Cost classification over active subscriptions.
+            let mut missing: Vec<String> = Vec::new();
+            match view.billing_type.as_str() {
+                "usage" => {
+                    if view.amount_minor.is_none() {
+                        usage_without_bills.push(view.clone());
+                    } else {
+                        // A metered amount cannot be folded like a fixed fee.
+                        missing.push("usage_not_foldable".to_string());
+                    }
+                }
+                "unknown" => missing.push("billing_type".to_string()),
+                "free" => {} // known zero-cost: no amount facts expected
+                "subscription" | "hybrid" => {
+                    if view.amount_minor.is_none() {
+                        missing.push("amount".to_string());
+                    }
+                    if view
+                        .currency
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|c| !c.is_empty())
+                        .is_none()
+                    {
+                        missing.push("currency".to_string());
+                    }
+                    let period = view
+                        .billing_period
+                        .as_deref()
+                        .and_then(money::BillingPeriod::parse);
+                    if period.is_none() {
+                        missing.push("billing_period".to_string());
+                    }
+                    if let (Some(amount), Some(period)) =
+                        (view.amount_minor, period)
+                    {
+                        if let Some(currency) = view.currency.clone() {
+                            let is_hybrid = view.billing_type == "hybrid";
+                            by_currency
+                                .entry(currency)
+                                .or_default()
+                                .push((money::CostLine { amount_minor: amount, period }, is_hybrid));
+                        }
+                    }
+                }
+                other => {
+                    return Err(Error::invalid_input(format!(
+                        "unknown billing_type {:?} stored in subscription {}",
+                        other, view.id
+                    )));
+                }
+            }
+            if !missing.is_empty() {
+                incomplete.push(IncompleteItem {
+                    subscription: view,
+                    missing,
+                });
+            }
+        }
+
+        let mut by_currency_out = Vec::new();
+        for (currency, lines) in by_currency {
+            let cost_lines: Vec<money::CostLine> =
+                lines.iter().map(|(line, _)| *line).collect();
+            let total = money::aggregate_currency(&cost_lines)?;
+            let hybrid_count = lines.iter().filter(|(_, hybrid)| *hybrid).count() as i64;
+            by_currency_out.push(CurrencyBreakdown {
+                currency,
+                monthly_equivalent_minor: total.monthly_equivalent_minor,
+                annual_equivalent_minor: total.annual_equivalent_minor,
+                subscription_count: cost_lines.len() as i64,
+                hybrid_count,
+            });
+        }
+
+        Ok(SpendingOverview {
+            by_currency: by_currency_out,
+            upcoming_renewals: upcoming,
+            renewals_unknown,
+            stale_renewals: stale,
+            later_renewals: later,
+            incomplete,
+            usage_without_bills,
+            counts,
+            generated_at: util::now(),
+            upcoming_window_days,
+        })
+    }
+
+    /// Refresh detection facts for every built-in adapter (read-only home
+    /// inspection + one transactional database write; D-1 audit event).
+    ///
+    /// Attach resolution per adapter (frozen C2/I2a rules):
+    /// 1. if the adapter already has a detection row whose attached item still
+    ///    exists, keep that attachment and refresh the facts in place —
+    ///    confirmed and merged items never receive duplicate entries;
+    /// 2. otherwise attach to the oldest unconfirmed, unmerged, detected-source
+    ///    item;
+    /// 3. otherwise create a new unconfirmed `source=detected` item.
+    /// Detection states are re-derived for every item afterwards (rules A/B/C).
+    pub fn stack_refresh_detections(&self) -> Result<StackRefreshReport> {
+        let now = util::now();
+        let items_before = self.db.list_stack_items()?;
+        let mut detections_before: HashMap<String, StackDetectionRow> = HashMap::new();
+        for row in self.db.list_stack_detections()? {
+            detections_before.insert(row.adapter_key.clone(), row);
+        }
+
+        let mut item_inserts: Vec<StackItemRow> = Vec::new();
+        let mut detection_upserts: Vec<StackDetectionRow> = Vec::new();
+        let detections_total = all_adapters().len();
+        let mut items_created = 0usize;
+
+        for adapter in all_adapters() {
+            let detection = adapter.detect(&self.config.home);
+            let status_str = match detection.status {
+                AgentStatus::Installed => "installed",
+                AgentStatus::NotInstalled => "not_installed",
+                AgentStatus::Unsupported => "unsupported",
+                AgentStatus::VerificationRequired => "verification_required",
+                AgentStatus::Error => "error",
+            };
+            let agent_id = self
+                .db
+                .get_agent_by_key(adapter.key())?
+                .map(|row| row.id);
+            // Attach target: keep the existing stable attachment when its item
+            // still exists (also covers confirmed and merged items — no
+            // duplicates, P0-3/I2a); otherwise resolve rule-① candidate.
+            let target = match detections_before.get(adapter.key()) {
+                Some(existing)
+                    if items_before.iter().any(|item| item.id == existing.stack_item_id) =>
+                {
+                    Some(existing.stack_item_id.clone())
+                }
+                _ => items_before
+                    .iter()
+                    .find(|item| {
+                        item.merged_into.is_none()
+                            && !item.confirmed
+                            && item.source == "detected"
+                    })
+                    .map(|item| item.id.clone()),
+            };
+            let target = match target {
+                Some(id) => id,
+                None => {
+                    let item = StackItemRow {
+                        id: util::new_id(),
+                        name: adapter.name().to_string(),
+                        vendor: Some(adapter.vendor().to_string()),
+                        source: "detected".to_string(),
+                        detection_state: detection_state_from_status(status_str),
+                        confirmed: false,
+                        last_confirmed_at: None,
+                        merged_into: None,
+                        overlap_group: None,
+                        notes: None,
+                        created_at: now.clone(),
+                        updated_at: now.clone(),
+                    };
+                    item_inserts.push(item.clone());
+                    items_created += 1;
+                    item.id
+                }
+            };
+            let upsert = StackDetectionRow {
+                id: util::new_id(),
+                stack_item_id: target,
+                adapter_key: adapter.key().to_string(),
+                agent_id,
+                detected_status: status_str.to_string(),
+                evidence_json: serde_json::to_string(&detection.evidence)?,
+                detected_at: now.clone(),
+            };
+            detection_upserts.push(upsert);
+        }
+
+        // Re-derive detection states for every item from the post-refresh
+        // detection set (A/B/C; items without detections are `unknown`).
+        let mut statuses_by_item: HashMap<String, Vec<&str>> = HashMap::new();
+        for row in detections_before.values() {
+            statuses_by_item
+                .entry(row.stack_item_id.clone())
+                .or_default()
+                .push(row.detected_status.as_str());
+        }
+        for row in &detection_upserts {
+            statuses_by_item
+                .entry(row.stack_item_id.clone())
+                .or_default()
+                .push(row.detected_status.as_str());
+        }
+        let mut state_updates: Vec<(String, String)> = Vec::new();
+        let mut seen: std::collections::BTreeSet<String> = Default::default();
+        for item in items_before.iter().chain(item_inserts.iter()) {
+            if !seen.insert(item.id.clone()) {
+                continue;
+            }
+            let state = items_before
+                .iter()
+                .find(|candidate| candidate.id == item.id)
+                .map(|row| row.detection_state.clone())
+                .unwrap_or_else(|| item.detection_state.clone());
+            let derived = derive_detection_state(
+                statuses_by_item.get(&item.id).map(|v| v.as_slice()),
+            );
+            if derived != state {
+                state_updates.push((item.id.clone(), derived));
+            }
+        }
+
+        let plan = StackRefreshPlan {
+            item_inserts,
+            detection_upserts,
+            state_updates,
+        };
+        self.db.apply_stack_refresh(&plan)?;
+
+        let items_attached = detections_total - items_created;
+        self.audit_stack(
+            "stack.refresh",
+            serde_json::json!({
+                "detections_total": detections_total,
+                "items_created": items_created,
+                "items_attached": items_attached,
+            }),
+        )?;
+        Ok(StackRefreshReport {
+            detections_total,
+            items_created,
+            items_attached,
+            ran_at: now,
+        })
+    }
+
+    /// Create a manual stack item or rename/annotate an existing one.
+    /// `source` and `detection_state` are system-owned and never user-set.
+    pub fn stack_upsert_item(&self, request: StackItemUpsert) -> Result<StackItemView> {
+        let name = request.name.trim();
+        if name.is_empty() {
+            return Err(Error::invalid_input("stack item name must not be empty"));
+        }
+        match request.id.as_deref() {
+            None => {
+                let _guard = self
+                    .write_lock
+                    .lock()
+                    .map_err(|_| Error::msg("runtime lock poisoned"))?;
+                let _runtime = self.runtime_guard()?;
+                let now = util::now();
+                let row = StackItemRow {
+                    id: util::new_id(),
+                    name: name.to_string(),
+                    vendor: request.vendor.clone(),
+                    source: "manual".to_string(),
+                    detection_state: crate::model::DETECTION_STATE_UNKNOWN.to_string(),
+                    confirmed: false,
+                    last_confirmed_at: None,
+                    merged_into: None,
+                    overlap_group: request.overlap_group.clone(),
+                    notes: request.notes.clone(),
+                    created_at: now.clone(),
+                    updated_at: now.clone(),
+                };
+                self.db.insert_stack_item(&row)?;
+                self.audit_stack(
+                    "stack.item.upsert",
+                    serde_json::json!({"action": "created", "id": row.id, "name": name}),
+                )?;
+                Ok(Self::stack_item_view(&row, 0, 0))
+            }
+            Some(id) => {
+                let existing = self
+                    .db
+                    .get_stack_item(id)?
+                    .ok_or_else(|| Error::not_found(format!("stack item {id} does not exist")))?;
+                let _guard = self
+                    .write_lock
+                    .lock()
+                    .map_err(|_| Error::msg("runtime lock poisoned"))?;
+                let _runtime = self.runtime_guard()?;
+                self.db.update_stack_item_fields(
+                    id,
+                    name,
+                    request.vendor.as_deref(),
+                    request.overlap_group.as_deref(),
+                    request.notes.as_deref(),
+                )?;
+                self.audit_stack(
+                    "stack.item.upsert",
+                    serde_json::json!({"action": "updated", "id": id, "name": name}),
+                )?;
+                let updated = self
+                    .db
+                    .get_stack_item(id)?
+                    .unwrap_or(existing);
+                let detections = self.db.list_stack_detections_for_item(id)?.len() as i64;
+                let subscriptions = self.db.count_subscriptions_for_item(id)?;
+                Ok(Self::stack_item_view(&updated, detections, subscriptions))
+            }
+        }
+    }
+
+    /// Mark a stack item as user-confirmed. Idempotent.
+    pub fn stack_confirm_item(&self, id: &str) -> Result<StackItemView> {
+        let existing = self
+            .db
+            .get_stack_item(id)?
+            .ok_or_else(|| Error::not_found(format!("stack item {id} does not exist")))?;
+        if existing.confirmed {
+            let detections = self.db.list_stack_detections_for_item(id)?.len() as i64;
+            let subscriptions = self.db.count_subscriptions_for_item(id)?;
+            return Ok(Self::stack_item_view(&existing, detections, subscriptions));
+        }
+        let _guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| Error::msg("runtime lock poisoned"))?;
+        let _runtime = self.runtime_guard()?;
+        let now = util::now();
+        self.db.set_stack_item_confirmed(id, &now)?;
+        self.audit_stack(
+            "stack.item.confirm",
+            serde_json::json!({"id": id}),
+        )?;
+        let updated = self
+            .db
+            .get_stack_item(id)?
+            .unwrap_or(existing);
+        let detections = self.db.list_stack_detections_for_item(id)?.len() as i64;
+        let subscriptions = self.db.count_subscriptions_for_item(id)?;
+        Ok(Self::stack_item_view(&updated, detections, subscriptions))
+    }
+
+    /// Merge one root item into another root item (G1). Subscription foreign
+    /// keys never move: aggregation happens over the merge group at read time
+    /// (P0-2). Reversible via `stack_unmerge_item`; illegal structures return
+    /// `Error::ResourceConflict`.
+    pub fn stack_merge_items(&self, child_id: &str, into_id: &str) -> Result<StackItemView> {
+        let child = self
+            .db
+            .get_stack_item(child_id)?
+            .ok_or_else(|| {
+                Error::not_found(format!("merge source stack item {child_id} does not exist"))
+            })?;
+        let target = self
+            .db
+            .get_stack_item(into_id)?
+            .ok_or_else(|| {
+                Error::not_found(format!("merge target stack item {into_id} does not exist"))
+            })?;
+        if child_id == into_id {
+            return Err(Error::resource_conflict(
+                "cannot merge a stack item into itself",
+            ));
+        }
+        if target.merged_into.is_some() {
+            return Err(Error::resource_conflict(format!(
+                "merge target {} is already merged into {}; merge targets must be root items",
+                into_id,
+                target.merged_into.unwrap_or_default()
+            )));
+        }
+        if child.merged_into.is_some() {
+            return Err(Error::resource_conflict(format!(
+                "stack item {child_id} is already merged into {}; unmerge it first",
+                child.merged_into.unwrap_or_default()
+            )));
+        }
+        let child_children = self.db.count_stack_item_children(child_id)?;
+        if child_children > 0 {
+            return Err(Error::resource_conflict(format!(
+                "stack item {child_id} already has {child_children} merged item(s); unmerge them first (merge depth is capped at one level)"
+            )));
+        }
+        let _guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| Error::msg("runtime lock poisoned"))?;
+        let _runtime = self.runtime_guard()?;
+        self.db.set_stack_item_merged_into(child_id, Some(into_id))?;
+        self.audit_stack(
+            "stack.merge",
+            serde_json::json!({"child_id": child_id, "into_id": into_id}),
+        )?;
+        let detections = self.db.list_stack_detections_for_item(child_id)?.len() as i64;
+        let subscriptions = self.db.count_subscriptions_for_item(child_id)?;
+        Ok(Self::stack_item_view(&child, detections, subscriptions))
+    }
+
+    /// Undo a merge. Idempotent: unmerging a root item returns it unchanged.
+    /// Subscription foreign keys are untouched (they never moved).
+    pub fn stack_unmerge_item(&self, id: &str) -> Result<StackItemView> {
+        let existing = self
+            .db
+            .get_stack_item(id)?
+            .ok_or_else(|| Error::not_found(format!("stack item {id} does not exist")))?;
+        if existing.merged_into.is_none() {
+            let detections = self.db.list_stack_detections_for_item(id)?.len() as i64;
+            let subscriptions = self.db.count_subscriptions_for_item(id)?;
+            return Ok(Self::stack_item_view(&existing, detections, subscriptions));
+        }
+        let _guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| Error::msg("runtime lock poisoned"))?;
+        let _runtime = self.runtime_guard()?;
+        self.db.set_stack_item_merged_into(id, None)?;
+        self.audit_stack(
+            "stack.unmerge",
+            serde_json::json!({"id": id, "previous_target": existing.merged_into.clone()}),
+        )?;
+        let updated = self
+            .db
+            .get_stack_item(id)?
+            .unwrap_or(existing);
+        let detections = self.db.list_stack_detections_for_item(id)?.len() as i64;
+        let subscriptions = self.db.count_subscriptions_for_item(id)?;
+        Ok(Self::stack_item_view(&updated, detections, subscriptions))
+    }
+
+    /// Delete a stack item. Blocked while it holds subscription records (any
+    /// status) or merged children (P0-4, G1); detections cascade away.
+    pub fn stack_delete_item(&self, id: &str) -> Result<()> {
+        let existing = self
+            .db
+            .get_stack_item(id)?
+            .ok_or_else(|| Error::not_found(format!("stack item {id} does not exist")))?;
+        let subscription_count = self.db.count_subscriptions_for_item(id)?;
+        if subscription_count > 0 {
+            return Err(Error::resource_conflict(format!(
+                "stack item {id} still holds {subscription_count} subscription record(s); delete or move them first"
+            )));
+        }
+        let children = self.db.count_stack_item_children(id)?;
+        if children > 0 {
+            return Err(Error::resource_conflict(format!(
+                "stack item {id} has {children} merged item(s); unmerge them first"
+            )));
+        }
+        let _guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| Error::msg("runtime lock poisoned"))?;
+        let _runtime = self.runtime_guard()?;
+        self.db.delete_stack_item(id)?;
+        self.audit_stack(
+            "stack.item.delete",
+            serde_json::json!({"id": id, "name": existing.name}),
+        )?;
+        Ok(())
+    }
+
+    /// Create or update one subscription record (D-1: direct execution).
+    /// Validation is fail-closed: unknown facts stay null, amounts must be
+    /// positive JSON-safe integers with a known currency, and the amount's
+    /// annual equivalent must itself be JSON-safe (G2 output guard at input).
+    pub fn subscription_upsert(&self, request: SubscriptionUpsert) -> Result<SubscriptionView> {
+        let product_name = request.product_name.trim();
+        if product_name.is_empty() {
+            return Err(Error::invalid_input(
+                "subscription product_name must not be empty",
+            ));
+        }
+        if !crate::model::BILLING_TYPES.contains(&request.billing_type.as_str()) {
+            return Err(Error::invalid_input(format!(
+                "billing_type {:?} must be one of {:?}",
+                request.billing_type,
+                crate::model::BILLING_TYPES
+            )));
+        }
+        let status = request.status.clone().unwrap_or_else(|| "active".to_string());
+        if !crate::model::SUBSCRIPTION_STATUSES.contains(&status.as_str()) {
+            return Err(Error::invalid_input(format!(
+                "status {:?} must be one of {:?}",
+                status,
+                crate::model::SUBSCRIPTION_STATUSES
+            )));
+        }
+        if let Some(amount) = request.amount_minor {
+            money::validate_amount_minor(amount)?;
+            let currency = request
+                .currency
+                .as_deref()
+                .map(str::trim)
+                .filter(|c| !c.is_empty())
+                .ok_or_else(|| {
+                    Error::invalid_input(
+                        "currency is required when amount_minor is provided; missing amounts stay null instead of zero",
+                    )
+                })?;
+            money::validate_currency(currency)?;
+        }
+        if let Some(period) = request.billing_period.as_deref() {
+            if !crate::model::BILLING_PERIODS.contains(&period) {
+                return Err(Error::invalid_input(format!(
+                    "billing_period {:?} must be one of {:?}",
+                    period,
+                    crate::model::BILLING_PERIODS
+                )));
+            }
+        }
+        for (field, date) in [("started_on", &request.started_on), ("renews_on", &request.renews_on)] {
+            if let Some(value) = date {
+                chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").map_err(|_| {
+                    Error::invalid_input(format!(
+                        "{field} must be an ISO date (YYYY-MM-DD), got {value:?}"
+                    ))
+                })?;
+            }
+        }
+        // G2 input guard: the amount's own annual equivalent must be
+        // representable, or later folding would leave the JSON safe range.
+        if let Some(amount) = request.amount_minor {
+            if let Some(period) = request
+                .billing_period
+                .as_deref()
+                .and_then(money::BillingPeriod::parse)
+            {
+                money::annual_equivalent(amount, period)?;
+            }
+        }
+        // The stack item must exist and must not be a merged child.
+        let item = self
+            .db
+            .get_stack_item(&request.stack_item_id)?
+            .ok_or_else(|| {
+                Error::not_found(format!(
+                    "stack item {} does not exist",
+                    request.stack_item_id
+                ))
+            })?;
+        if item.merged_into.is_some() {
+            return Err(Error::resource_conflict(format!(
+                "stack item {} is merged into {}; register the subscription on the target item",
+                item.id,
+                item.merged_into.unwrap_or_default()
+            )));
+        }
+
+        let _guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| Error::msg("runtime lock poisoned"))?;
+        let _runtime = self.runtime_guard()?;
+        let now = util::now();
+        let action;
+        let view = match request.id.as_deref() {
+            None => {
+                action = "created";
+                let row = SubscriptionRow {
+                    id: util::new_id(),
+                    stack_item_id: request.stack_item_id.clone(),
+                    product_name: product_name.to_string(),
+                    vendor: request.vendor.clone(),
+                    plan_name: request.plan_name.clone(),
+                    billing_type: request.billing_type.clone(),
+                    amount_minor: request.amount_minor,
+                    currency: request.currency.clone(),
+                    billing_period: request.billing_period.clone(),
+                    started_on: request.started_on.clone(),
+                    renews_on: request.renews_on.clone(),
+                    status,
+                    notes: request.notes.clone(),
+                    info_source: request.info_source.clone(),
+                    last_confirmed_at: Some(now.clone()),
+                    superseded_by: None,
+                    created_at: now.clone(),
+                    updated_at: now.clone(),
+                };
+                self.db.insert_subscription(&row)?;
+                Self::subscription_view(row)
+            }
+            Some(id) => {
+                action = "updated";
+                let existing = self
+                    .db
+                    .get_subscription(id)?
+                    .ok_or_else(|| {
+                        Error::not_found(format!("subscription {id} does not exist"))
+                    })?;
+                let row = SubscriptionRow {
+                    id: existing.id.clone(),
+                    stack_item_id: request.stack_item_id.clone(),
+                    product_name: product_name.to_string(),
+                    vendor: request.vendor.clone(),
+                    plan_name: request.plan_name.clone(),
+                    billing_type: request.billing_type.clone(),
+                    amount_minor: request.amount_minor,
+                    currency: request.currency.clone(),
+                    billing_period: request.billing_period.clone(),
+                    started_on: request.started_on.clone(),
+                    renews_on: request.renews_on.clone(),
+                    status,
+                    notes: request.notes.clone(),
+                    info_source: request.info_source.clone(),
+                    last_confirmed_at: Some(now.clone()),
+                    superseded_by: existing.superseded_by.clone(),
+                    created_at: existing.created_at.clone(),
+                    updated_at: now.clone(),
+                };
+                self.db.update_subscription(&row)?;
+                Self::subscription_view(row)
+            }
+        };
+        self.audit_stack(
+            "subscription.upsert",
+            serde_json::json!({
+                "action": action,
+                "id": view.id,
+                "stack_item_id": view.stack_item_id,
+                "billing_type": view.billing_type,
+                "amount_known": view.amount_minor.is_some(),
+                "currency": view.currency,
+                "status": view.status,
+            }),
+        )?;
+        Ok(view)
+    }
+
+    /// Delete one subscription record.
+    pub fn subscription_delete(&self, id: &str) -> Result<()> {
+        let existing = self
+            .db
+            .get_subscription(id)?
+            .ok_or_else(|| Error::not_found(format!("subscription {id} does not exist")))?;
+        let _guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| Error::msg("runtime lock poisoned"))?;
+        let _runtime = self.runtime_guard()?;
+        self.db.delete_subscription(id)?;
+        self.audit_stack(
+            "subscription.delete",
+            serde_json::json!({"id": id, "stack_item_id": existing.stack_item_id}),
+        )?;
+        Ok(())
+    }
+
+    /// Read the newest audit events (D-1 trail), newest first. Read-only.
+    pub fn stack_audit_events(&self, limit: usize) -> Result<Vec<crate::db::AuditEventRow>> {
+        self.db.list_audit_events(limit)
+    }
+
+}
+
+fn detection_state_from_status(status: &str) -> String {
+    match status {
+        "installed" | "verification_required" => crate::model::DETECTION_STATE_INSTALLED.to_string(),
+        "not_installed" => crate::model::DETECTION_STATE_NOT_INSTALLED.to_string(),
+        // No strong evidence (unsupported, error, or nothing at all).
+        _ => crate::model::DETECTION_STATE_UNKNOWN.to_string(),
+    }
+}
+
+/// Rules A/B/C (frozen): any installed-classified detection wins, then
+/// not_installed, else unknown. Detections without a positive install signal
+/// (unsupported/error) contribute `unknown`.
+fn derive_detection_state(statuses: Option<&[&str]>) -> String {
+    let statuses = statuses.unwrap_or(&[]);
+    if statuses
+        .iter()
+        .any(|s| *s == "installed" || *s == "verification_required")
+    {
+        return crate::model::DETECTION_STATE_INSTALLED.to_string();
+    }
+    if statuses.iter().any(|s| *s == "not_installed") {
+        return crate::model::DETECTION_STATE_NOT_INSTALLED.to_string();
+    }
+    crate::model::DETECTION_STATE_UNKNOWN.to_string()
 }
 
 /// Recursively fold the user's home directory prefix in every JSON string

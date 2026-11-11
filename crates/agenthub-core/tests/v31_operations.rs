@@ -332,7 +332,8 @@ fn v3_migration_creates_a_pre_migration_backup() {
     assert!(found, "pre-migration backup was not created");
     let integrity = _hub.integrity_report().expect("integrity");
     assert!(integrity.ok, "integrity: {:?}", integrity.details);
-    assert_eq!(integrity.schema_version, 3);
+    // SCHEMA_V4 ("my-ai-stack-v1") moved the version pin.
+    assert_eq!(integrity.schema_version, 4);
     let _: &Path = backups.as_path();
 }
 
@@ -411,7 +412,8 @@ fn backup_restore_round_trip_creates_safety_copy() {
 
     let restored = hub.restore_backup(&backup.id).expect("restore");
     assert!(restored.integrity_ok);
-    assert_eq!(restored.schema_version, 3);
+    // The snapshot was taken from a v4 database, so restoring it yields v4.
+    assert_eq!(restored.schema_version, 4);
     assert_eq!(restored.capability_count, 1);
     let skills = hub.list_skills().expect("skills after restore");
     assert_eq!(skills.len(), 1);
