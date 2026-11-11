@@ -277,10 +277,29 @@ mod tests {
             total.monthly_equivalent_minor, 667,
             "8000/12 = 666.67 rounds half-up once, to 667"
         );
+        // The generic invariant is exact half-up division (never ceil); the
+        // `(annual + 11) / 12` ceil idiom would also give 667 here but is NOT
+        // the semantics, so verify through the real half-up helper instead.
+        let wide = total.annual_equivalent_minor as i128;
         assert_eq!(
             total.monthly_equivalent_minor,
-            (total.annual_equivalent_minor + 11) / 12,
-            "monthly is derived from the exact annual total"
+            div_round_half_up(wide, 12) as i64,
+            "monthly is exact half-up of the annual total"
+        );
+        assert_eq!(
+            div_round_half_up(8001, 12) as i64,
+            667,
+            "half-up is not ceiling: 8001/12 = 666.75 -> 667"
+        );
+        assert_eq!(
+            div_round_half_up(8005, 12) as i64,
+            667,
+            "8005/12 = 667.08 -> 667, not 668"
+        );
+        assert_eq!(
+            div_round_half_up(8006, 12) as i64,
+            667,
+            "8006/12 = 667.17 -> 667 (ceil would say 668)"
         );
     }
 

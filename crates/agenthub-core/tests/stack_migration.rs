@@ -186,6 +186,16 @@ fn migration_failure_mid_way_rolls_back_partial_ddl() {
         "user_version must not advance on mid-way failure"
     );
 
+    // N2: the rollback must leave the database structurally sound right away
+    // — before the obstruction is removed and before any recovery step.
+    let immediate_integrity: String = conn
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(
+        immediate_integrity, "ok",
+        "rollback left an intact database"
+    );
+
     let count = |name: &str, kind: &str| -> i64 {
         conn.query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = ?2 AND name = ?1",
