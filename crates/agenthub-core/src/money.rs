@@ -224,6 +224,66 @@ pub fn aggregate_currency(lines: &[CostLine]) -> Result<CurrencyTotal> {
 mod tests {
     use super::*;
 
+    /// M0-R frozen arithmetic case (P0-1 / E3): two CNY 1000-minor
+    /// semiannual subscriptions must aggregate to annual 4000 and a monthly
+    /// equivalent of 333 (4000/12 = 333.33, single half-up rounding), never
+    /// 334 (per-line rounding) and never 667 (wrong period or double count).
+    #[test]
+    fn frozen_m0r_case_two_cny_1000_semiannual_monthly_333() {
+        let lines = [
+            CostLine {
+                amount_minor: 1000,
+                period: BillingPeriod::Semiannual,
+            },
+            CostLine {
+                amount_minor: 1000,
+                period: BillingPeriod::Semiannual,
+            },
+        ];
+        let total = aggregate_currency(&lines).expect("frozen case must aggregate");
+        assert_eq!(
+            total.annual_equivalent_minor, 4000,
+            "each line folds to 2000/yr exactly"
+        );
+        assert_eq!(
+            total.monthly_equivalent_minor, 333,
+            "4000/12 rounds half-up once, to 333"
+        );
+    }
+
+    /// The M1-A spending fixture amount (two CNY 2000-minor semiannual
+    /// subscriptions) at the money layer: annual 8000 → monthly 667. This is
+    /// the case the M1-A report quoted with a typo'd amount (1000); both the
+    /// fixture amount and the result are recorded here so the two frozen
+    /// cases can never be confused again.
+    #[test]
+    fn m1a_fixture_case_two_cny_2000_semiannual_monthly_667() {
+        let lines = [
+            CostLine {
+                amount_minor: 2000,
+                period: BillingPeriod::Semiannual,
+            },
+            CostLine {
+                amount_minor: 2000,
+                period: BillingPeriod::Semiannual,
+            },
+        ];
+        let total = aggregate_currency(&lines).expect("fixture case must aggregate");
+        assert_eq!(
+            total.annual_equivalent_minor, 8000,
+            "each line folds to 4000/yr exactly"
+        );
+        assert_eq!(
+            total.monthly_equivalent_minor, 667,
+            "8000/12 = 666.67 rounds half-up once, to 667"
+        );
+        assert_eq!(
+            total.monthly_equivalent_minor,
+            (total.annual_equivalent_minor + 11) / 12,
+            "monthly is derived from the exact annual total"
+        );
+    }
+
     #[test]
     fn folds_monthly_annual_and_divisors() {
         assert_eq!(

@@ -120,6 +120,165 @@ fn migration_failure_rolls_back_and_keeps_version_3() {
 }
 
 #[test]
+fn migration_failure_mid_way_rolls_back_partial_ddl() {
+    // F2: prove rollback of a *partially executed* migration, not just a
+    // first-statement failure. The fixture is a genuine V3 database (copied
+    // from the pre-migration snapshot) holding verifiable business data, with
+    // an incompatible `stack_detections` table injected. SCHEMA_V4 then
+    // executes: stack_items table + both idx_stack_items_* indexes succeed,
+    // then the idx_stack_detections_item creation fails ("no such column")
+    // *after* earlier DDL committed work inside the transaction. Everything
+    // — tables AND the successfully created indexes — must roll back.
+    let f = Fixture::new();
+    let hub = f.hub();
+    drop(hub); // fresh fixture migrated to v4 and left a v3 backup behind
+
+    // Build an isolated home whose database is a genuine V3 snapshot.
+    let home2 = f.home.join("home2/.agenthub");
+    std::fs::create_dir_all(&home2).unwrap();
+    let v3_db = home2.join("agenthub.db");
+    let backup = find_pre_v3_backup(&f.home).expect("pre-migration-v3 backup must exist");
+    std::fs::copy(&backup, &v3_db).expect("copy V3 snapshot as the fixture database");
+    for suffix in ["-wal", "-shm"] {
+        let _ = std::fs::remove_file(v3_db.to_string_lossy().to_string() + suffix);
+    }
+
+    // Verifiable V1-V3 business data + mid-migration failure injection.
+    {
+        let conn = rusqlite::Connection::open(&v3_db).unwrap();
+        conn.pragma_update(None, "user_version", 3).unwrap();
+        conn.execute(
+            "INSERT INTO settings (key, value, updated_at) VALUES ('f2-marker', 'before-v4', '2026-11-11T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        let settings: i64 = conn
+            .query_row("SELECT COUNT(*) FROM settings", [], |row| row.get(0))
+            .unwrap();
+        assert!(settings >= 1, "fixture must hold existing business data");
+        // Incompatible shape: the v4 index on (stack_item_id) will fail with
+        // "no such column" — but only AFTER stack_items and its two indexes
+        // were created successfully inside the transaction.
+        conn.execute_batch("CREATE TABLE stack_detections (bogus INTEGER NOT NULL);")
+            .unwrap();
+        drop(conn);
+    }
+
+    let home2_root = f.home.join("home2");
+    match agenthub_core::AgentHub::open(agenthub_core::CoreConfig::for_home(&home2_root)) {
+        Err(err) => {
+            let text = err.to_string();
+            assert!(
+                text.contains("no such column"),
+                "expected the injected mid-migration failure, got: {text}"
+            );
+        }
+        Ok(_) => panic!("migration must fail against the incompatible table"),
+    }
+
+    // Post-mortem on the untouched V3 database.
+    let conn = rusqlite::Connection::open(&v3_db).unwrap();
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(
+        version, 3,
+        "user_version must not advance on mid-way failure"
+    );
+
+    let count = |name: &str, kind: &str| -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = ?2 AND name = ?1",
+            rusqlite::params![name, kind],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    for name in [
+        "stack_items",
+        "subscription_records",
+        "idx_stack_items_merged",
+        "idx_stack_items_group",
+        "idx_subscriptions_item",
+    ] {
+        assert_eq!(
+            count(name, "table") + count(name, "index"),
+            0,
+            "{name} must be rolled back"
+        );
+    }
+    // The injected blocker table legitimately survives the rollback (it was
+    // created by the fixture, outside the transaction) — verify it is still
+    // the incompatible shape, i.e. no migration-created replacement exists.
+    let bogus_columns: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('stack_detections') WHERE name = 'bogus'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        bogus_columns, 1,
+        "surviving table is the fixture's injected one"
+    );
+
+    let marker: String = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'f2-marker'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(marker, "before-v4", "existing business data unchanged");
+    drop(conn);
+
+    // The failed migration must still have left a readable v3 backup behind.
+    let home2_backups = home2_root.join(".agenthub/backups");
+    let mut v3_backup = None;
+    for entry in std::fs::read_dir(&home2_backups)
+        .expect("backups dir exists")
+        .flatten()
+    {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with("pre-migration-v3-") {
+            v3_backup = Some(entry.path().join("agenthub.db"));
+        }
+    }
+    let v3_backup = v3_backup.expect("pre-migration backup written before the failed v4 run");
+    let backup_conn = rusqlite::Connection::open(&v3_backup).unwrap();
+    let backup_version: i64 = backup_conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(
+        backup_version, 3,
+        "backup snapshot is a readable v3 database"
+    );
+    drop(backup_conn);
+
+    // Remove the injection and prove the database can migrate to v4 cleanly.
+    let conn = rusqlite::Connection::open(&v3_db).unwrap();
+    conn.execute("DROP TABLE stack_detections", []).unwrap();
+    drop(conn);
+    let hub = agenthub_core::AgentHub::open(agenthub_core::CoreConfig::for_home(&home2_root))
+        .expect("migration succeeds after the obstruction is removed");
+    assert_eq!(user_version(&hub), 4, "re-migration to v4 succeeds");
+    assert!(table_exists(&hub, "stack_items"));
+    hub.db()
+        .integrity_check()
+        .expect("database intact after recovery");
+    let marker: String = hub
+        .db()
+        .conn()
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'f2-marker'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(marker, "before-v4", "business data survives recovery");
+}
+
+#[test]
 fn restore_pre_migration_backup_downgrades_and_re_migrates() {
     // 2.12 recovery path: v4 database → restore the pre-migration-v3 backup →
     // user_version 3, no stack tables → reopening migrates to v4 again.
