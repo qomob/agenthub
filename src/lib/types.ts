@@ -958,3 +958,173 @@ export interface ImpactRequest {
   fromVersionId: string | null
   toVersionId: string
 }
+
+// ---------------------------------------------------------------------------
+// My AI Stack (M1-B) — mirrors the frozen core views in crates/agenthub-core
+// src/model.rs (serde camelCase). Amounts are integer minor units (i64,
+// JSON-safe by core validation ≤ 2^53-1); never floats.
+// ---------------------------------------------------------------------------
+
+/** Derived from detections only: installed | not_installed | unknown. */
+export type StackDetectionState = 'installed' | 'not_installed' | 'unknown'
+/** detected = created by a stack refresh; manual = created by the user. */
+export type StackItemSource = 'detected' | 'manual'
+/** registered | none — whether the item holds subscription records. */
+export type StackSubscriptionState = 'registered' | 'none'
+/** free | subscription | usage | hybrid | unknown. */
+export type BillingType = 'free' | 'subscription' | 'usage' | 'hybrid' | 'unknown'
+/** monthly | quarterly | semiannual | yearly | usage | unknown. */
+export type BillingPeriod =
+  | 'monthly'
+  | 'quarterly'
+  | 'semiannual'
+  | 'yearly'
+  | 'usage'
+  | 'unknown'
+/** active | paused | cancelled | expired | unknown. */
+export type SubscriptionStatus = 'active' | 'paused' | 'cancelled' | 'expired' | 'unknown'
+
+export interface StackItemView {
+  id: string
+  name: string
+  vendor?: string
+  source: StackItemSource
+  detectionState: StackDetectionState
+  confirmed: boolean
+  lastConfirmedAt?: string
+  subscriptionState: StackSubscriptionState
+  /** Present when this item was merged into another item (reversible link). */
+  mergedInto?: string
+  /** User-declared near-purpose group (opaque string; Cost Optimizer R1 input). */
+  overlapGroup?: string
+  notes?: string
+  createdAt: string
+  updatedAt: string
+  detectionCount: number
+  subscriptionCount: number
+}
+
+export interface StackDetectionView {
+  id: string
+  stackItemId: string
+  adapterKey: string
+  agentId?: string
+  /** Adapter-observed AgentStatus string (installed, not_installed, …). */
+  detectedStatus: string
+  /** Quasi-personal data: local database only, never sent anywhere. */
+  evidence: string[]
+  detectedAt: string
+}
+
+export interface SubscriptionView {
+  id: string
+  stackItemId: string
+  productName: string
+  vendor?: string
+  planName?: string
+  billingType: BillingType
+  /** Integer minor units; undefined = amount unknown (never displayed as 0). */
+  amountMinor?: number
+  currency?: string
+  billingPeriod?: BillingPeriod
+  /** ISO date `YYYY-MM-DD`. */
+  startedOn?: string
+  /** ISO date `YYYY-MM-DD`. */
+  renewsOn?: string
+  status: SubscriptionStatus
+  notes?: string
+  infoSource?: string
+  lastConfirmedAt?: string
+  supersededBy?: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface StackItemDetail {
+  item: StackItemView
+  detections: StackDetectionView[]
+  subscriptions: SubscriptionView[]
+  /** Items merged into this one (children), folded into the group. */
+  mergedChildren: StackItemView[]
+}
+
+export interface StackItemUpsertRequest {
+  id?: string
+  name: string
+  vendor?: string
+  overlapGroup?: string
+  notes?: string
+}
+
+export interface SubscriptionUpsertRequest {
+  id?: string
+  stackItemId: string
+  productName: string
+  vendor?: string
+  planName?: string
+  billingType: BillingType
+  /** Integer minor units; omit for unknown amount. */
+  amountMinor?: number
+  currency?: string
+  billingPeriod?: BillingPeriod
+  startedOn?: string
+  renewsOn?: string
+  status?: SubscriptionStatus
+  notes?: string
+  infoSource?: string
+}
+
+export interface StackRefreshReport {
+  detectionsTotal: number
+  /** Items created during this refresh (unconfirmed, source=detected). */
+  itemsCreated: number
+  /** Detections attached to an existing item instead of a new one. */
+  itemsAttached: number
+  ranAt: string
+}
+
+export interface CurrencyBreakdown {
+  currency: string
+  /** Sum of monthly equivalents, rounded once from the exact annual total. */
+  monthlyEquivalentMinor: number
+  /** Exact sum of annual equivalents. */
+  annualEquivalentMinor: number
+  subscriptionCount: number
+  /** Hybrid subscriptions contributing their known fixed fee. */
+  hybridCount: number
+}
+
+/** Reasons: amount | currency | billing_period | billing_type | usage_not_foldable. */
+export interface IncompleteItem {
+  subscription: SubscriptionView
+  missing: string[]
+}
+
+export interface SubscriptionCounts {
+  total: number
+  active: number
+  paused: number
+  cancelled: number
+  expired: number
+  unknown: number
+}
+
+export interface SpendingOverview {
+  /** Per-currency equivalent totals. Currencies are never summed together. */
+  byCurrency: CurrencyBreakdown[]
+  /** Active subscriptions renewing within the window [today, today+N]. */
+  upcomingRenewals: SubscriptionView[]
+  /** Active subscriptions whose renews_on is unknown. */
+  renewalsUnknown: SubscriptionView[]
+  /** Active subscriptions whose renews_on is in the past. */
+  staleRenewals: SubscriptionView[]
+  /** Active renewals registered beyond the window. */
+  laterRenewals: SubscriptionView[]
+  /** Active subscriptions missing cost facts required for folding. */
+  incomplete: IncompleteItem[]
+  /** Usage-billed subscriptions without bill data (not estimated). */
+  usageWithoutBills: SubscriptionView[]
+  counts: SubscriptionCounts
+  generatedAt: string
+  upcomingWindowDays: number
+}

@@ -547,6 +547,79 @@ fn profiles_plan_apply(
     state.run(|hub| hub.plan_profile_apply(&profile_id))
 }
 
+// ---------------------------------------------------------------------------
+// My AI Stack (M1-B) — thin wrappers over the frozen core service surface.
+// Every command keeps the v3.1 `ApiResult<T>` envelope; validation, locking,
+// audit and error classification stay entirely in `agenthub-core` (single
+// engine, dual frontends). Writes are direct per D-1; no operations are
+// created, no Agent directories are touched.
+// ---------------------------------------------------------------------------
+
+#[tauri::command(rename_all = "snake_case")]
+fn stack_list(state: State<'_, AppState>) -> ApiResult<Vec<StackItemView>> {
+    state.run_api(|hub| hub.stack_items())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+fn stack_get(state: State<'_, AppState>, id: String) -> ApiResult<StackItemDetail> {
+    state.run_api(|hub| hub.stack_item_detail(&id))
+}
+
+#[tauri::command(rename_all = "snake_case")]
+fn stack_upsert_item(
+    state: State<'_, AppState>,
+    request: StackItemUpsert,
+) -> ApiResult<StackItemView> {
+    state.run_api(|hub| hub.stack_upsert_item(request))
+}
+
+#[tauri::command(rename_all = "snake_case")]
+fn stack_confirm_item(state: State<'_, AppState>, id: String) -> ApiResult<StackItemView> {
+    state.run_api(|hub| hub.stack_confirm_item(&id))
+}
+
+#[tauri::command(rename_all = "snake_case")]
+fn stack_merge_items(
+    state: State<'_, AppState>,
+    child_id: String,
+    into_id: String,
+) -> ApiResult<StackItemView> {
+    state.run_api(|hub| hub.stack_merge_items(&child_id, &into_id))
+}
+
+#[tauri::command(rename_all = "snake_case")]
+fn stack_unmerge_item(state: State<'_, AppState>, id: String) -> ApiResult<StackItemView> {
+    state.run_api(|hub| hub.stack_unmerge_item(&id))
+}
+
+#[tauri::command(rename_all = "snake_case")]
+fn stack_delete_item(state: State<'_, AppState>, id: String) -> ApiResult<()> {
+    state.run_api(|hub| hub.stack_delete_item(&id))
+}
+
+#[tauri::command(rename_all = "snake_case")]
+fn stack_refresh_detections(state: State<'_, AppState>) -> ApiResult<StackRefreshReport> {
+    state.run_api(|hub| hub.stack_refresh_detections())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+fn subscription_upsert(
+    state: State<'_, AppState>,
+    request: SubscriptionUpsert,
+) -> ApiResult<SubscriptionView> {
+    state.run_api(|hub| hub.subscription_upsert(request))
+}
+
+#[tauri::command(rename_all = "snake_case")]
+fn subscription_delete(state: State<'_, AppState>, id: String) -> ApiResult<()> {
+    state.run_api(|hub| hub.subscription_delete(&id))
+}
+
+#[tauri::command(rename_all = "snake_case")]
+fn spending_overview(state: State<'_, AppState>) -> ApiResult<SpendingOverview> {
+    state.run_api(|hub| hub.spending_overview())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let state = AppState::new();
@@ -609,7 +682,18 @@ pub fn run() {
             profiles_list,
             profiles_upsert,
             profiles_delete,
-            profiles_plan_apply
+            profiles_plan_apply,
+            stack_list,
+            stack_get,
+            stack_upsert_item,
+            stack_confirm_item,
+            stack_merge_items,
+            stack_unmerge_item,
+            stack_delete_item,
+            stack_refresh_detections,
+            subscription_upsert,
+            subscription_delete,
+            spending_overview
         ])
         .run(tauri::generate_context!())
         .expect("error while running AgentHub");

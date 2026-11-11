@@ -78,6 +78,7 @@ const ICONS: Record<string, string> = {
     '<path d="m12 3 1.6 4.4L18 9l-4.4 1.6L12 15l-1.6-4.4L6 9l4.4-1.6L12 3Z"/><path d="m19 15 .8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8L19 15Z"/>',
   play: '<path d="m6 3 14 9-14 9V3Z"/>',
   git: '<circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9M6 15V6a3 3 0 0 1 3-3h2"/>',
+  stack: '<rect x="3" y="4" width="18" height="6" rx="1.5"/><rect x="3" y="14" width="18" height="6" rx="1.5"/>',
 }
 
 const inner = computed(() => ICONS[props.name] ?? ICONS.info)

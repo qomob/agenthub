@@ -12,6 +12,8 @@ import ProfilesView from './pages/ProfilesView.vue'
 import SettingsView from './pages/SettingsView.vue'
 import SkillDetailView from './pages/SkillDetailView.vue'
 import SkillsView from './pages/SkillsView.vue'
+import StackDetailView from './pages/StackDetailView.vue'
+import StackView from './pages/StackView.vue'
 
 export interface NavItem {
   path: string
@@ -103,6 +105,15 @@ export const navItems: NavItem[] = [
     icon: 'settings',
     group: 'system',
   },
+  // Appended at the END on purpose: the Cmd+1..9 shortcuts index navItems[0..8]
+  // positionally, and inserting earlier would re-map existing shortcuts.
+  {
+    path: '/stack',
+    name: 'stack',
+    labelKey: 'nav.stack',
+    icon: 'stack',
+    group: 'workspace',
+  },
 ]
 
 const routes: RouteRecordRaw[] = [
@@ -167,6 +178,18 @@ const routes: RouteRecordRaw[] = [
     name: 'settings',
     component: SettingsView,
     meta: { titleKey: 'nav.settings' },
+  },
+  {
+    path: '/stack',
+    name: 'stack',
+    component: StackView,
+    meta: { titleKey: 'nav.stack' },
+  },
+  {
+    path: '/stack/:id',
+    name: 'stack-detail',
+    component: StackDetailView,
+    meta: { titleKey: 'nav.stack' },
   },
   { path: '/:pathMatch(.*)*', redirect: '/dashboard' },
 ]

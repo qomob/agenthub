@@ -113,6 +113,16 @@ enum Commands {
         #[command(subcommand)]
         command: BackupsCommand,
     },
+    /// Manage the My AI Stack inventory (M1-B; reads + direct writes).
+    Stack {
+        #[command(subcommand)]
+        command: StackCommand,
+    },
+    /// Manage subscriptions registered on stack items (M1-B).
+    Sub {
+        #[command(subcommand)]
+        command: SubCommand,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -199,6 +209,229 @@ struct RestoreArgs {
 enum BackupsCommand {
     /// List backups present in the library.
     List,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum BillingTypeArg {
+    Free,
+    Subscription,
+    Usage,
+    Hybrid,
+    Unknown,
+}
+
+impl BillingTypeArg {
+    fn as_str(self) -> &'static str {
+        match self {
+            BillingTypeArg::Free => "free",
+            BillingTypeArg::Subscription => "subscription",
+            BillingTypeArg::Usage => "usage",
+            BillingTypeArg::Hybrid => "hybrid",
+            BillingTypeArg::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum BillingPeriodArg {
+    Monthly,
+    Quarterly,
+    Semiannual,
+    Yearly,
+    Usage,
+    Unknown,
+}
+
+impl BillingPeriodArg {
+    fn as_str(self) -> &'static str {
+        match self {
+            BillingPeriodArg::Monthly => "monthly",
+            BillingPeriodArg::Quarterly => "quarterly",
+            BillingPeriodArg::Semiannual => "semiannual",
+            BillingPeriodArg::Yearly => "yearly",
+            BillingPeriodArg::Usage => "usage",
+            BillingPeriodArg::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SubscriptionStatusArg {
+    Active,
+    Paused,
+    Cancelled,
+    Expired,
+    Unknown,
+}
+
+impl SubscriptionStatusArg {
+    fn as_str(self) -> &'static str {
+        match self {
+            SubscriptionStatusArg::Active => "active",
+            SubscriptionStatusArg::Paused => "paused",
+            SubscriptionStatusArg::Cancelled => "cancelled",
+            SubscriptionStatusArg::Expired => "expired",
+            SubscriptionStatusArg::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Subcommand)]
+enum StackCommand {
+    /// List stack items (read-only).
+    List,
+    /// Show one stack item: detections, subscriptions and merged children.
+    Show { id: String },
+    /// Add a manual stack item (direct write per D-1).
+    Add(StackUpsertArgs),
+    /// Edit a stack item (direct write per D-1). Omitted fields keep their
+    /// current value; pass an empty string (`--vendor ""`) to clear a field.
+    Edit(StackEditArgs),
+    /// Mark a detected item as user-confirmed (direct write per D-1).
+    Confirm { id: String },
+    /// Merge one item into another (high impact: requires --yes).
+    /// Subscriptions stay on the child item and the merge stays reversible
+    /// (unmerge is available in the GUI / service layer, not exposed in CLI M1-B).
+    Merge {
+        /// The child item id.
+        child_id: String,
+        /// The target item id (must not itself be merged).
+        #[arg(long)]
+        into: String,
+        /// Confirm the merge.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Delete a stack item (high impact: requires --yes). Items holding any
+    /// subscription or merged children are rejected by the core.
+    Delete {
+        id: String,
+        /// Confirm the deletion.
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Debug, Args)]
+struct StackUpsertArgs {
+    /// Display name (required, non-empty).
+    #[arg(long)]
+    name: String,
+    #[arg(long)]
+    vendor: Option<String>,
+    /// Near-purpose group label (Cost Optimizer R1 input).
+    #[arg(long = "overlap-group")]
+    overlap_group: Option<String>,
+    #[arg(long)]
+    notes: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct StackEditArgs {
+    /// Stack item id (see `stack list --json`).
+    id: String,
+    #[arg(long)]
+    name: Option<String>,
+    #[arg(long)]
+    vendor: Option<String>,
+    #[arg(long = "overlap-group")]
+    overlap_group: Option<String>,
+    #[arg(long)]
+    notes: Option<String>,
+}
+
+#[derive(Debug, Subcommand)]
+enum SubCommand {
+    /// Register a subscription on a stack item (direct write per D-1).
+    /// Unknown facts are simply omitted; they are never invented.
+    Add(SubAddArgs),
+    /// Edit a subscription (direct write per D-1). Omitted fields keep their
+    /// current value; pass an empty string to clear an optional field.
+    Edit(SubEditArgs),
+    /// Delete a subscription record (high impact: requires --yes).
+    Delete {
+        id: String,
+        /// Confirm the deletion.
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Debug, Args)]
+struct SubAddArgs {
+    /// Stack item id to attach the subscription to.
+    #[arg(long = "stack")]
+    stack_item_id: String,
+    /// Product or service name (required).
+    #[arg(long = "product")]
+    product_name: String,
+    #[arg(long)]
+    vendor: Option<String>,
+    /// Plan / tier name.
+    #[arg(long)]
+    plan: Option<String>,
+    /// free | subscription | usage | hybrid | unknown.
+    #[arg(long)]
+    billing_type: BillingTypeArg,
+    /// Amount in MAJOR units of the currency (e.g. `20.5` for USD 20.50).
+    /// Omit when the amount is unknown — it is never filled with a default.
+    #[arg(long)]
+    amount: Option<String>,
+    /// ISO-4217 code (required when --amount is given).
+    #[arg(long)]
+    currency: Option<String>,
+    /// monthly | quarterly | semiannual | yearly | usage | unknown.
+    #[arg(long)]
+    period: Option<BillingPeriodArg>,
+    /// Subscription start date (YYYY-MM-DD).
+    #[arg(long = "started-on")]
+    started_on: Option<String>,
+    /// Next renewal date (YYYY-MM-DD).
+    #[arg(long = "renews-on")]
+    renews_on: Option<String>,
+    /// active | paused | cancelled | expired | unknown (default: active).
+    #[arg(long)]
+    status: Option<SubscriptionStatusArg>,
+    #[arg(long)]
+    notes: Option<String>,
+    /// Where this information came from (e.g. "user entry", invoice header).
+    #[arg(long = "info-source")]
+    info_source: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct SubEditArgs {
+    /// Subscription id (see `stack show --json` or the GUI).
+    id: String,
+    /// Move the subscription to another stack item (optional).
+    #[arg(long = "stack")]
+    stack_item_id: Option<String>,
+    #[arg(long = "product")]
+    product_name: Option<String>,
+    #[arg(long)]
+    vendor: Option<String>,
+    #[arg(long)]
+    plan: Option<String>,
+    #[arg(long)]
+    billing_type: Option<BillingTypeArg>,
+    /// Amount in major units; empty string clears the amount.
+    #[arg(long)]
+    amount: Option<String>,
+    /// ISO-4217 code; empty string clears it.
+    #[arg(long)]
+    currency: Option<String>,
+    #[arg(long)]
+    period: Option<BillingPeriodArg>,
+    #[arg(long = "started-on")]
+    started_on: Option<String>,
+    #[arg(long = "renews-on")]
+    renews_on: Option<String>,
+    #[arg(long)]
+    status: Option<SubscriptionStatusArg>,
+    #[arg(long)]
+    notes: Option<String>,
+    #[arg(long = "info-source")]
+    info_source: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -661,6 +894,24 @@ fn run(cli: Cli) -> CliResult<u8> {
         Commands::Backups { command } => match command {
             BackupsCommand::List => cmd_backups_list(&ctx),
         },
+        Commands::Stack { command } => match command {
+            StackCommand::List => cmd_stack_list(&ctx),
+            StackCommand::Show { id } => cmd_stack_show(&ctx, &id),
+            StackCommand::Add(args) => cmd_stack_add(&ctx, &args),
+            StackCommand::Edit(args) => cmd_stack_edit(&ctx, &args),
+            StackCommand::Confirm { id } => cmd_stack_confirm(&ctx, &id),
+            StackCommand::Merge {
+                child_id,
+                into,
+                yes,
+            } => cmd_stack_merge(&ctx, &child_id, &into, yes),
+            StackCommand::Delete { id, yes } => cmd_stack_delete(&ctx, &id, yes),
+        },
+        Commands::Sub { command } => match command {
+            SubCommand::Add(args) => cmd_sub_add(&ctx, &args),
+            SubCommand::Edit(args) => cmd_sub_edit(&ctx, &args),
+            SubCommand::Delete { id, yes } => cmd_sub_delete(&ctx, &id, yes),
+        },
     }
 }
 
@@ -714,6 +965,20 @@ fn print_json(value: &Value) {
 // ---------------------------------------------------------------------------
 // Formatting helpers
 // ---------------------------------------------------------------------------
+
+/// Exact minor→major decimal rendering with integer math only (no floats):
+/// `format_major(2050, 2)` → `"20.50"`, `format_major(100, 0)` → `"100"`.
+/// Negative values are impossible for stored amounts (> 0, validated).
+fn format_major(minor: i64, exponent: u8) -> String {
+    if exponent == 0 {
+        return minor.to_string();
+    }
+    let denominator = 10i64.pow(exponent as u32);
+    let major = minor / denominator;
+    let fraction = minor % denominator;
+    let digits = format!("{fraction:0width$}", width = exponent as usize);
+    format!("{major}.{digits}")
+}
 
 fn hash_prefix(hash: Option<&str>) -> String {
     match hash {
@@ -2204,6 +2469,441 @@ fn cmd_backups_list(ctx: &Ctx) -> CliResult<u8> {
                 backup.id, backup.size_bytes, backup.created_at, backup.path
             );
         }
+    }
+    Ok(EXIT_OK)
+}
+
+// ---------------------------------------------------------------------------
+// My AI Stack (M1-B)
+//
+// Reads and writes go straight to the shared core service (D-1): no approval
+// plans are produced for stack commands. Deletion and merging are high-impact
+// and therefore require `--yes`; the refusal is a usage error, not a backend
+// contract error. All JSON output keeps the v3.1 `ApiResult` envelope, and the
+// `ResourceConflict` / `InvalidInput` / `NotFound` error classification comes
+// from the core untouched (`map_api_error` passthrough via `ApiContext::Inspect`).
+// ---------------------------------------------------------------------------
+
+/// Parse a user-entered amount in MAJOR units into integer minor units with
+/// integer arithmetic only (no float multiplication). Rejects negatives and
+/// values that would not be JSON-safe after folding.
+fn parse_amount_major(text: &str, currency: &str) -> CliResult<i64> {
+    let exponent = agenthub_core::money::currency_exponent(currency).ok_or_else(|| {
+        CliError::invalid_input(format!("unsupported currency code {currency:?}"))
+    })?;
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err(CliError::invalid_input("amount must not be empty"));
+    }
+    if trimmed.starts_with('-') {
+        return Err(CliError::invalid_input(
+            "amounts must be positive; register unknown amounts by omitting --amount",
+        ));
+    }
+    let (whole, fraction) = match trimmed.split_once('.') {
+        Some((whole, fraction)) => (whole, fraction),
+        None => (trimmed, ""),
+    };
+    if whole.is_empty()
+        || !whole.bytes().all(|b| b.is_ascii_digit())
+        || !fraction.bytes().all(|b| b.is_ascii_digit())
+    {
+        return Err(CliError::invalid_input(format!(
+            "amount {text:?} is not a valid decimal number"
+        )));
+    }
+    if fraction.len() > exponent as usize {
+        return Err(CliError::invalid_input(format!(
+            "amount {text:?} has more than {exponent} decimal places for {currency}"
+        )));
+    }
+    let mut fraction = fraction.to_string();
+    while fraction.len() < exponent as usize {
+        fraction.push('0');
+    }
+    let whole_number: i128 = whole
+        .parse()
+        .map_err(|_| CliError::invalid_input(format!("amount {text:?} is out of range")))?;
+    let minor: i128 = whole_number
+        .checked_mul(10i128.pow(exponent as u32))
+        .and_then(|value| value.checked_add(fraction.parse::<i128>().unwrap_or(0) as i128))
+        .ok_or_else(|| CliError::invalid_input(format!("amount {text:?} is out of range")))?;
+    let minor_i64 = i64::try_from(minor).map_err(|_| {
+        CliError::invalid_input(format!("amount {text:?} is out of the safe integer range"))
+    })?;
+    agenthub_core::money::validate_amount_minor(minor_i64)
+        .map_err(|error| CliError::invalid_input(error.to_string()))?;
+    Ok(minor_i64)
+}
+
+/// Refuse a high-impact stack command without `--yes` (D-1 contract).
+fn require_yes(action: &str, yes: bool) -> CliResult<()> {
+    if yes {
+        return Ok(());
+    }
+    Err(CliError::legacy(format!(
+        "refusing to {action}: this is a high-impact action; re-run with --yes to confirm"
+    )))
+}
+
+fn print_stack_item(item: &StackItemView) {
+    let merged = match &item.merged_into {
+        Some(target) => format!(" merged-into={target}"),
+        None => String::new(),
+    };
+    println!(
+        "{:<38} source={} state={} confirmed={} subs={} detections={}{}",
+        format!("{} ({})", item.name, item.id),
+        item.source,
+        item.detection_state,
+        item.confirmed,
+        item.subscription_count,
+        item.detection_count,
+        merged
+    );
+}
+
+fn print_subscription(subscription: &SubscriptionView) {
+    let amount = match (subscription.amount_minor, &subscription.currency) {
+        (Some(minor), Some(currency)) => {
+            let exponent = agenthub_core::money::currency_exponent(currency).unwrap_or(2);
+            let denominator = 10i64.pow(exponent as u32);
+            format!("{}/{}", minor / denominator, currency)
+        }
+        (Some(_), None) => "<amount without currency>".to_string(),
+        _ => "<amount unknown>".to_string(),
+    };
+    let period = subscription.billing_period.as_deref().unwrap_or("unknown");
+    println!(
+        "{:<40} type={} amount={} period={} status={} renews={} item={}",
+        format!("{} ({})", subscription.product_name, subscription.id),
+        subscription.billing_type,
+        amount,
+        period,
+        subscription.status,
+        subscription.renews_on.as_deref().unwrap_or("unknown"),
+        subscription.stack_item_id
+    );
+}
+
+fn cmd_stack_list(ctx: &Ctx) -> CliResult<u8> {
+    let items = api_call(ApiContext::Inspect, ctx.hub.stack_items())?;
+    if ctx.json {
+        ctx.emit_api_success(&items)?;
+    } else if items.is_empty() {
+        println!(
+            "No stack items yet. Add one with `agenthub stack add` or refresh detections in the desktop app."
+        );
+    } else {
+        for item in &items {
+            print_stack_item(item);
+        }
+    }
+    // Frozen plan: the spending summary folds into `stack list`. A spending
+    // failure must not blank the item list or fake zero cost (UX-1): print the
+    // explicit failure and keep the command successful about the items.
+    if !ctx.json {
+        match ctx.hub.spending_overview() {
+            Ok(overview) => {
+                if !overview.by_currency.is_empty() {
+                    println!("spending (monthly equivalent, not this month's charge):");
+                    for currency in &overview.by_currency {
+                        let exponent = agenthub_core::money::currency_exponent(&currency.currency)
+                            .unwrap_or(2);
+                        println!(
+                            "  {} {} / month, {} {} / year, {} active subscriptions",
+                            format_major(currency.monthly_equivalent_minor, exponent),
+                            currency.currency,
+                            format_major(currency.annual_equivalent_minor, exponent),
+                            currency.currency,
+                            currency.subscription_count
+                        );
+                    }
+                }
+                if !overview.incomplete.is_empty() {
+                    println!(
+                        "  {} subscription(s) incomplete; unknown facts are shown as unknown, never as zero.",
+                        overview.incomplete.len()
+                    );
+                }
+                if !overview.usage_without_bills.is_empty() {
+                    println!(
+                        "  {} usage-based subscription(s) without bills are not estimated.",
+                        overview.usage_without_bills.len()
+                    );
+                }
+            }
+            Err(spending_failure) => {
+                let error = agenthub_core::contract::ApiError::from_error(&spending_failure);
+                println!(
+                    "spending overview failed: {} {} (items above are still shown; nothing was changed)",
+                    error.code.as_str(),
+                    spending_failure
+                );
+            }
+        }
+    }
+    Ok(EXIT_OK)
+}
+
+fn cmd_stack_show(ctx: &Ctx, id: &str) -> CliResult<u8> {
+    let detail = api_call(ApiContext::Inspect, ctx.hub.stack_item_detail(id))?;
+    if ctx.json {
+        ctx.emit_api_success(&detail)?;
+        return Ok(EXIT_OK);
+    }
+    print_stack_item(&detail.item);
+    println!("detections ({}):", detail.detections.len());
+    for detection in &detail.detections {
+        println!(
+            "  {:<20} status={} at={}",
+            detection.adapter_key, detection.detected_status, detection.detected_at
+        );
+        for evidence in &detection.evidence {
+            println!("    evidence: {evidence}");
+        }
+    }
+    println!("subscriptions ({}):", detail.subscriptions.len());
+    for subscription in &detail.subscriptions {
+        print_subscription(subscription);
+    }
+    if !detail.merged_children.is_empty() {
+        println!("merged children ({}):", detail.merged_children.len());
+        for child in &detail.merged_children {
+            print_stack_item(child);
+        }
+    }
+    Ok(EXIT_OK)
+}
+
+fn cmd_stack_add(ctx: &Ctx, args: &StackUpsertArgs) -> CliResult<u8> {
+    let request = StackItemUpsert {
+        id: None,
+        name: args.name.clone(),
+        vendor: args.vendor.clone(),
+        overlap_group: args.overlap_group.clone(),
+        notes: args.notes.clone(),
+    };
+    let item = api_call(ApiContext::Inspect, ctx.hub.stack_upsert_item(request))?;
+    if ctx.json {
+        ctx.emit_api_success(&item)?;
+    } else {
+        println!("Stack item added: {} ({})", item.name, item.id);
+    }
+    Ok(EXIT_OK)
+}
+
+fn cmd_stack_edit(ctx: &Ctx, args: &StackEditArgs) -> CliResult<u8> {
+    // Omitted flags keep the current value (the core overwrite semantics would
+    // otherwise silently clear fields); empty strings clear explicitly.
+    let existing = api_call(ApiContext::Inspect, ctx.hub.stack_item_detail(&args.id))?;
+    let name = args
+        .name
+        .clone()
+        .unwrap_or_else(|| existing.item.name.clone());
+    let vendor = match &args.vendor {
+        Some(value) => (!value.is_empty()).then(|| value.clone()),
+        None => existing.item.vendor.clone(),
+    };
+    let overlap_group = match &args.overlap_group {
+        Some(value) => (!value.is_empty()).then(|| value.clone()),
+        None => existing.item.overlap_group.clone(),
+    };
+    let notes = match &args.notes {
+        Some(value) => (!value.is_empty()).then(|| value.clone()),
+        None => existing.item.notes.clone(),
+    };
+    let request = StackItemUpsert {
+        id: Some(args.id.clone()),
+        name,
+        vendor,
+        overlap_group,
+        notes,
+    };
+    let item = api_call(ApiContext::Inspect, ctx.hub.stack_upsert_item(request))?;
+    if ctx.json {
+        ctx.emit_api_success(&item)?;
+    } else {
+        println!("Stack item updated: {} ({})", item.name, item.id);
+    }
+    Ok(EXIT_OK)
+}
+
+fn cmd_stack_confirm(ctx: &Ctx, id: &str) -> CliResult<u8> {
+    let item = api_call(ApiContext::Inspect, ctx.hub.stack_confirm_item(id))?;
+    if ctx.json {
+        ctx.emit_api_success(&item)?;
+    } else {
+        println!("Stack item confirmed: {} ({})", item.name, item.id);
+    }
+    Ok(EXIT_OK)
+}
+
+fn cmd_stack_merge(ctx: &Ctx, child_id: &str, into_id: &str, yes: bool) -> CliResult<u8> {
+    require_yes(&format!("merge {child_id} into {into_id}"), yes)?;
+    let item = api_call(
+        ApiContext::Inspect,
+        ctx.hub.stack_merge_items(child_id, into_id),
+    )?;
+    if ctx.json {
+        ctx.emit_api_success(&item)?;
+    } else {
+        println!("Stack item merged into {} ({})", item.name, item.id);
+    }
+    Ok(EXIT_OK)
+}
+
+fn cmd_stack_delete(ctx: &Ctx, id: &str, yes: bool) -> CliResult<u8> {
+    require_yes(&format!("delete stack item {id}"), yes)?;
+    api_call(ApiContext::Inspect, ctx.hub.stack_delete_item(id))?;
+    if ctx.json {
+        ctx.emit_api_success(&json!({ "deleted": id }))?;
+    } else {
+        println!("Stack item deleted: {id}");
+    }
+    Ok(EXIT_OK)
+}
+
+fn cmd_sub_add(ctx: &Ctx, args: &SubAddArgs) -> CliResult<u8> {
+    let amount_minor = match (&args.amount, &args.currency) {
+        (Some(text), Some(currency)) => Some(parse_amount_major(text, currency)?),
+        (Some(_), None) => {
+            return Err(CliError::invalid_input(
+                "--currency is required when --amount is given; missing amounts stay unknown instead of zero",
+            ))
+        }
+        (None, _) => None,
+    };
+    let request = SubscriptionUpsert {
+        id: None,
+        stack_item_id: args.stack_item_id.clone(),
+        product_name: args.product_name.clone(),
+        vendor: args.vendor.clone(),
+        plan_name: args.plan.clone(),
+        billing_type: args.billing_type.as_str().to_string(),
+        amount_minor,
+        currency: args.currency.clone(),
+        billing_period: args.period.map(|period| period.as_str().to_string()),
+        started_on: args.started_on.clone(),
+        renews_on: args.renews_on.clone(),
+        status: args.status.map(|status| status.as_str().to_string()),
+        notes: args.notes.clone(),
+        info_source: args.info_source.clone(),
+    };
+    let subscription = api_call(ApiContext::Inspect, ctx.hub.subscription_upsert(request))?;
+    if ctx.json {
+        ctx.emit_api_success(&subscription)?;
+    } else {
+        println!(
+            "Subscription registered: {} ({}) on item {}",
+            subscription.product_name, subscription.id, subscription.stack_item_id
+        );
+    }
+    Ok(EXIT_OK)
+}
+
+fn cmd_sub_edit(ctx: &Ctx, args: &SubEditArgs) -> CliResult<u8> {
+    // Omitted flags keep the current value; empty strings clear fields. The
+    // core always rewrites the whole record, so this prefill keeps `sub edit`
+    // from silently wiping facts the user did not mention.
+    let subscriptions = api_call(ApiContext::Inspect, ctx.hub.subscriptions())?;
+    let existing = subscriptions
+        .iter()
+        .find(|candidate| candidate.id == args.id)
+        .ok_or_else(|| {
+            CliError::invalid_input(format!("subscription {} does not exist", args.id))
+        })?;
+    let amount_minor = match &args.amount {
+        Some(text) if text.is_empty() => None,
+        Some(text) => {
+            let currency = args
+                .currency
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .or_else(|| existing.currency.clone())
+                .ok_or_else(|| {
+                    CliError::invalid_input(
+                        "--currency is required when --amount is given (no current currency to reuse)",
+                    )
+                })?;
+            Some(parse_amount_major(text, &currency)?)
+        }
+        None => existing.amount_minor,
+    };
+    let currency = match &args.currency {
+        Some(value) => (!value.is_empty()).then(|| value.clone()),
+        None => existing.currency.clone(),
+    };
+    let request = SubscriptionUpsert {
+        id: Some(existing.id.clone()),
+        stack_item_id: args
+            .stack_item_id
+            .clone()
+            .unwrap_or_else(|| existing.stack_item_id.clone()),
+        product_name: args
+            .product_name
+            .clone()
+            .unwrap_or_else(|| existing.product_name.clone()),
+        vendor: match &args.vendor {
+            Some(value) => (!value.is_empty()).then(|| value.clone()),
+            None => existing.vendor.clone(),
+        },
+        plan_name: match &args.plan {
+            Some(value) => (!value.is_empty()).then(|| value.clone()),
+            None => existing.plan_name.clone(),
+        },
+        billing_type: args
+            .billing_type
+            .map(|value| value.as_str().to_string())
+            .unwrap_or_else(|| existing.billing_type.clone()),
+        amount_minor,
+        currency,
+        billing_period: args
+            .period
+            .map(|value| value.as_str().to_string())
+            .or_else(|| existing.billing_period.clone()),
+        started_on: args
+            .started_on
+            .clone()
+            .or_else(|| existing.started_on.clone()),
+        renews_on: args
+            .renews_on
+            .clone()
+            .or_else(|| existing.renews_on.clone()),
+        status: args
+            .status
+            .map(|value| value.as_str().to_string())
+            .or_else(|| Some(existing.status.clone())),
+        notes: match &args.notes {
+            Some(value) => (!value.is_empty()).then(|| value.clone()),
+            None => existing.notes.clone(),
+        },
+        info_source: match &args.info_source {
+            Some(value) => (!value.is_empty()).then(|| value.clone()),
+            None => existing.info_source.clone(),
+        },
+    };
+    let subscription = api_call(ApiContext::Inspect, ctx.hub.subscription_upsert(request))?;
+    if ctx.json {
+        ctx.emit_api_success(&subscription)?;
+    } else {
+        println!(
+            "Subscription updated: {} ({})",
+            subscription.product_name, subscription.id
+        );
+    }
+    Ok(EXIT_OK)
+}
+
+fn cmd_sub_delete(ctx: &Ctx, id: &str, yes: bool) -> CliResult<u8> {
+    require_yes(&format!("delete subscription {id}"), yes)?;
+    api_call(ApiContext::Inspect, ctx.hub.subscription_delete(id))?;
+    if ctx.json {
+        ctx.emit_api_success(&json!({ "deleted": id }))?;
+    } else {
+        println!("Subscription deleted: {id}");
     }
     Ok(EXIT_OK)
 }

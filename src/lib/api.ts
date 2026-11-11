@@ -45,6 +45,13 @@ import type {
   Skill,
   SkillDetail,
   SnapshotView,
+  SpendingOverview,
+  StackItemDetail,
+  StackItemUpsertRequest,
+  StackItemView,
+  StackRefreshReport,
+  SubscriptionUpsertRequest,
+  SubscriptionView,
   UninstallRequest,
   UpdateImpact,
   ValidationRequest,
@@ -281,6 +288,22 @@ export const api = {
   profilesDelete: (id: string) => call<void>('profiles_delete', { id }),
   profilesPlanApply: (profileId: string) =>
     call<OperationPlan>('profiles_plan_apply', { profile_id: profileId }),
+
+  // My AI Stack (M1-B) — v3.1 ApiResult envelope; writes are direct per D-1.
+  stackList: () => callApi<StackItemView[]>('stack_list'),
+  stackGet: (id: string) => callApi<StackItemDetail>('stack_get', { id }),
+  stackUpsertItem: (request: StackItemUpsertRequest) =>
+    callApi<StackItemView>('stack_upsert_item', { request }),
+  stackConfirmItem: (id: string) => callApi<StackItemView>('stack_confirm_item', { id }),
+  stackMergeItems: (childId: string, intoId: string) =>
+    callApi<StackItemView>('stack_merge_items', { child_id: childId, into_id: intoId }),
+  stackUnmergeItem: (id: string) => callApi<StackItemView>('stack_unmerge_item', { id }),
+  stackDeleteItem: (id: string) => callApi<void>('stack_delete_item', { id }),
+  stackRefreshDetections: () => callApi<StackRefreshReport>('stack_refresh_detections'),
+  subscriptionUpsert: (request: SubscriptionUpsertRequest) =>
+    callApi<SubscriptionView>('subscription_upsert', { request }),
+  subscriptionDelete: (id: string) => callApi<void>('subscription_delete', { id }),
+  spendingOverview: () => callApi<SpendingOverview>('spending_overview'),
 }
 
 export type Api = typeof api

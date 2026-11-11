@@ -309,8 +309,11 @@ fn merge_requires_root_items_and_is_reversible() {
     // roots, but A already holds B).
     let err = hub.stack_merge_items(&a.id, &c.id).unwrap_err();
     assert!(matches!(err, Error::ResourceConflict(_)), "got {err:?}");
-    // A remains a legal TARGET (it is still a root).
-    hub.stack_merge_items(&c.id, &a.id).unwrap();
+    // A remains a legal TARGET (it is still a root), and the merge call must
+    // return the POST-merge view: a stale pre-merge row would publish
+    // merged_into = null to the GUI/CLI.
+    let merged_view = hub.stack_merge_items(&c.id, &a.id).unwrap();
+    assert_eq!(merged_view.merged_into.as_deref(), Some(a.id.as_str()));
 
     // Unmerge restores the root and keeps subscription FKs untouched.
     hub.stack_unmerge_item(&b.id).unwrap();

@@ -3948,7 +3948,10 @@ impl AgentHub {
         )?;
         let detections = self.db.list_stack_detections_for_item(child_id)?.len() as i64;
         let subscriptions = self.db.count_subscriptions_for_item(child_id)?;
-        Ok(Self::stack_item_view(&child, detections, subscriptions))
+        // Return the post-merge row: the pre-merge `child` copy still has the
+        // old `merged_into` value and would publish stale data to GUI/CLI.
+        let updated = self.db.get_stack_item(child_id)?.unwrap_or(child);
+        Ok(Self::stack_item_view(&updated, detections, subscriptions))
     }
 
     /// Undo a merge. Idempotent: unmerging a root item returns it unchanged.
