@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -32,6 +32,7 @@ import type {
   SubscriptionStatus,
   SubscriptionView,
 } from '../lib/types'
+import { useRefreshOnActivate } from '../composables/useRefreshOnActivate'
 import { useStackStore } from '../stores/stack'
 import { useUiStore } from '../stores/ui'
 
@@ -84,8 +85,13 @@ const deletingSub = ref(false)
 
 const subscriptions = computed(() => detail.value?.subscriptions ?? [])
 
-onMounted(load)
 watch(itemId, load)
+
+// Re-validate on every real activation (keep-alive re-entry, window focus);
+// the store TTL keeps a same-window re-activation a cache hit.
+useRefreshOnActivate(() => {
+  void load()
+})
 
 async function load(): Promise<void> {
   if (!itemId.value) return

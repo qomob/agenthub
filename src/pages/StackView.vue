@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 
@@ -19,6 +19,7 @@ import {
   stackSubscriptionStateKey,
 } from '../lib/stack'
 import type { CurrencyBreakdown, SpendingOverview, StackItemView } from '../lib/types'
+import { useRefreshOnActivate } from '../composables/useRefreshOnActivate'
 import { useStackStore } from '../stores/stack'
 import { useUiStore } from '../stores/ui'
 
@@ -83,14 +84,24 @@ function currencyRow(breakdown: CurrencyBreakdown): { monthly: string; annual: s
 
 const hasSpendingData = computed(() => (spending.value?.counts.total ?? 0) > 0)
 
-onMounted(async () => {
+/**
+ * Refresh on every real activation (mount, keep-alive re-entry, window focus).
+ * The store TTL decides whether that read hits the cache, so re-entering the
+ * page within 15s costs nothing — but returning after that always re-checks,
+ * which is what makes an external CLI write visible without a restart.
+ */
+useRefreshOnActivate(() => {
+  void refreshFromSource()
+})
+
+async function refreshFromSource(): Promise<void> {
   try {
     await stackStore.load()
   } catch {
     // error state is surfaced by the banner
   }
   await stackStore.loadSpending()
-})
+}
 
 async function refreshDetections(): Promise<void> {
   refreshing.value = true
