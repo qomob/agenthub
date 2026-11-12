@@ -179,6 +179,7 @@ async function saveSubscription(): Promise<void> {
     })
     subEditorOpen.value = false
     ui.notify('success', t('stack.subSaved'))
+    stackStore.invalidateSpending()
     await load()
   } catch (err) {
     subError.value = normalizeError(err, t('stack.errors.saveFailed'))
@@ -195,6 +196,7 @@ async function deleteSubscription(): Promise<void> {
     await api.subscriptionDelete(subscription.id)
     subDeleteTarget.value = null
     ui.notify('success', t('stack.subDeleted'))
+    stackStore.invalidateSpending()
     await load()
   } catch (err) {
     subDeleteTarget.value = null
@@ -211,6 +213,7 @@ async function doUnmerge(): Promise<void> {
     await api.stackUnmergeItem(itemId.value)
     unmergeTarget.value = false
     ui.notify('success', t('stack.unmergeDone'))
+    stackStore.invalidateSpending()
     await load()
     await stackStore.load(true)
   } catch (err) {
@@ -272,6 +275,7 @@ async function saveItem(): Promise<void> {
     })
     itemEditorOpen.value = false
     ui.notify('success', t('stack.saved'))
+    stackStore.invalidateSpending()
     await load()
     await stackStore.load(true)
   } catch (err) {
@@ -288,6 +292,7 @@ async function deleteItem(): Promise<void> {
     await api.stackDeleteItem(itemId.value)
     deleteItemOpen.value = false
     ui.notify('success', t('stack.deleted'))
+    stackStore.invalidateSpending()
     await stackStore.load(true)
     await router.push({ name: 'stack' })
   } catch (err) {
@@ -338,6 +343,7 @@ async function doMerge(): Promise<void> {
     mergeModalOpen.value = false
     mergeConfirmOpen.value = false
     ui.notify('success', t('stack.mergeDone'))
+    stackStore.invalidateSpending()
     await load()
     await stackStore.load(true)
   } catch (err) {

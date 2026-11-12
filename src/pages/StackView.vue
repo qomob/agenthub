@@ -97,8 +97,9 @@ async function refreshDetections(): Promise<void> {
   refreshNote.value = null
   try {
     const report = await api.stackRefreshDetections()
+    stackStore.invalidateSpending()
     await stackStore.load(true)
-    await stackStore.loadSpending(true)
+    await stackStore.loadSpending()
     ui.notify('success', t('stack.refreshDone'), {
       detail: t('stack.refreshDetail', {
         total: report.detectionsTotal,
@@ -140,8 +141,9 @@ async function save(): Promise<void> {
     })
     editorOpen.value = false
     ui.notify('success', t('stack.saved'), { detail: draft.name.trim() })
+    stackStore.invalidateSpending()
     await stackStore.load(true)
-    await stackStore.loadSpending(true)
+    await stackStore.loadSpending()
   } catch (err) {
     editorError.value = normalize(err)
   } finally {
@@ -174,8 +176,9 @@ async function doMerge(): Promise<void> {
     await api.stackMergeItems(child.id, mergeIntoId.value)
     mergeTarget.value = null
     ui.notify('success', t('stack.mergeDone'))
+    stackStore.invalidateSpending()
     await stackStore.load(true)
-    await stackStore.loadSpending(true)
+    await stackStore.loadSpending()
   } catch (err) {
     mergeError.value = normalize(err)
   } finally {
@@ -191,8 +194,9 @@ async function doUnmerge(): Promise<void> {
     await api.stackUnmergeItem(item.id)
     unmergeTarget.value = null
     ui.notify('success', t('stack.unmergeDone'))
+    stackStore.invalidateSpending()
     await stackStore.load(true)
-    await stackStore.loadSpending(true)
+    await stackStore.loadSpending()
   } catch (err) {
     ui.notifyError(t('stack.errors.unmergeFailed'), normalize(err))
     unmergeTarget.value = null
@@ -210,8 +214,9 @@ async function doDelete(): Promise<void> {
     await api.stackDeleteItem(item.id)
     deleteTarget.value = null
     ui.notify('success', t('stack.deleted'), { detail: item.name })
+    stackStore.invalidateSpending()
     await stackStore.load(true)
-    await stackStore.loadSpending(true)
+    await stackStore.loadSpending()
   } catch (err) {
     deleteError.value = normalize(err)
   } finally {

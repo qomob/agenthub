@@ -1529,7 +1529,7 @@ export const zh = {
     upcomingItem: '{name} · 续费日 {date}',
     staleTitle: '续费日已过期',
     staleItem: '{name} · 续费日 {date}（已过期）',
-    spendingEmpty: '成本概览尚未生成。登记订阅后重新进入本页即可生成。',
+    spendingEmpty: '成本概览尚未生成。登记订阅后即可生成；成本数据每 15 秒自动刷新，本应用内的增删改会立即更新。',
     spendingErrorTitle: '成本计算失败',
     spendingErrorBody: '成本汇总计算出现异常，但这不是数据丢失：工具与订阅登记仍然完好。可稍后重试。',
     retrySpending: '重试计算',

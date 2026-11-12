@@ -1541,7 +1541,7 @@ export const en: typeof zh = {
     upcomingItem: '{name} · renews {date}',
     staleTitle: 'Renewal date already passed',
     staleItem: '{name} · renewal date {date} (already passed)',
-    spendingEmpty: 'The spending overview has not been generated yet. Register subscriptions and reopen this page to generate it.',
+    spendingEmpty: 'The spending overview has not been generated yet. It appears once you register a subscription, refreshes automatically every 15 seconds, and updates immediately after changes made in this app.',
     spendingErrorTitle: 'Cost calculation failed',
     spendingErrorBody: 'The spending aggregation hit an error, but this is not data loss: your tool and subscription records are intact. You can retry later.',
     retrySpending: 'Retry calculation',
