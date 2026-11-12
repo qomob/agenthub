@@ -1,0 +1,10 @@
+=== CLI (same fixture, same moment) ===
+spending (monthly equivalent, not this month's charge):
+  68.00 CNY / month, 816.00 CNY / year, 1 active subscriptions
+  27.50 USD / month, 330.00 USD / year, 2 active subscriptions
+  1 subscription(s) incomplete; unknown facts are shown as unknown, never as zero.
+  1 usage-based subscription(s) without bills are not estimated.
+
+=== DB truth ===
+CNY|1|6800
+USD|2|5500

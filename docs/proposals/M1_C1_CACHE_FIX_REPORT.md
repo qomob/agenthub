@@ -105,7 +105,7 @@ let spendingInFlight: Promise<...> | null = null     // 在飞请求复用
 
 | 语言 | 修复前 | 修复后 |
 |---|---|---|
-| zh（`src/i18n/zh.ts:1532`） | `成本概览尚未生成。登记订阅后重新进入本页即可生成。` | ~~`成本概览尚未生成。登记订阅后即可生成；成本数据每 15 秒自动刷新，本应用内的增删改会立即更新。`~~ → **已被 M1-C.1 Final Contract Alignment 取代**：`成本概览尚未生成。登记订阅后即可生成。本应用内的增删改会立即同步；其他程序（例如命令行）的改动会在你重新打开本页或切回窗口时更新。` |
+| zh（`src/i18n/zh.ts:1532`） | `成本概览尚未生成。登记订阅后重新进入本页即可生成。` | ~~`…每 15 秒自动刷新…`~~（无定时器支撑，已作废）→ **终版**：`成本概览尚未生成。登记订阅后即可生成。本应用内的修改会立即同步；其他程序的修改会在重新打开页面或切回窗口时检查更新，短时间内可能仍显示缓存数据。` |
 | en（`src/i18n/en.ts:1544`） | `The spending overview has not been generated yet. Register subscriptions and reopen this page to generate it.` | `The spending overview has not been generated yet. It appears once you register a subscription, refreshes automatically every 15 seconds, and updates immediately after changes made in this app.` |
 
 原文案承诺「重新进入本页即可生成」与修复前的实际行为**直接矛盾**（重新进入正是命中永不过期缓存的路径）。新文案与实际机制一致，中英文语义对齐；i18n 键完全镜像（zh/en 各 1160 键，无缺失）。

@@ -255,10 +255,19 @@ describe('M1-C.1 refresh contract: the copy matches the mechanism', () => {
   it('states the two things that really do refresh: own writes and re-activation', () => {
     // zh: own changes sync immediately; other programs' changes land on reopen/refocus
     expect(zh).toContain('立即同步')
-    expect(zh).toMatch(/重新打开本页|切回窗口/)
+    expect(zh).toMatch(/重新打开本页|重新打开页面|切回窗口/)
 
     // en: same two facts
     expect(en.toLowerCase()).toContain('sync immediately')
     expect(en.toLowerCase()).toMatch(/reopen this page|switch back to the window/)
+  })
+
+  it('admits that a re-activation inside the TTL may still show cached figures', () => {
+    // A re-activation is not a guarantee of freshness: the store still serves a
+    // cache hit for 15s, so the copy must not imply the new numbers are certain.
+    expect(zh).toMatch(/缓存/)
+    expect(zh).toMatch(/短时间内|可能仍/)
+    expect(en.toLowerCase()).toMatch(/cached figures|cached/)
+    expect(en.toLowerCase()).toMatch(/briefly|may still/)
   })
 })

@@ -50,6 +50,15 @@ coverage/
 !/docs/evidence/gui-dashboard-app-only.png
 !/docs/evidence/gui-health-app-only.png
 !/docs/evidence/gui-onboarding-app-only.png
+# M1 验收证据第一层：已逐张脱敏与哈希登记的 13 张关键截图 + 清单
+!/docs/evidence/m1/
+!/docs/evidence/m1/README.md
+!/docs/evidence/m1/manifest.sha256
+!/docs/evidence/m1/acceptance-matrix.md
+!/docs/evidence/m1/cli-vs-db.txt
+!/docs/evidence/m1/screenshots/
+# quarantine/ 内的未脱敏原件永不进入版本库
+/docs/evidence/m1/quarantine/
 /docs/handoffs/
 
 # landing 部署工具本地配置
