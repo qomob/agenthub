@@ -301,7 +301,7 @@ v0.6.0 发布         FROZEN（未打 tag、未发布）
 1. **证据归档**（**已按负责人裁定完成**）：
    - **报告已入库**：`docs/proposals/` 全目录（M0 / M0-R / M1-A / M1-B / M1-C / M1-C.1 / 本报告）已随 commit `2f433d5` 纳入 Git。
    - **关键截图已入库**：`docs/evidence/m1/`（13 张已核验截图 + `README.md` + `manifest.sha256` + `acceptance-matrix.md` + `cli-vs-db.txt`），随本阶段提交纳入 Git，并以 SHA-256 清单固定。
-   - **完整证据包独立归档**：`agenthub-m1-acceptance-20261112.tar.zst`（17.8 MB，77 个条目，SHA-256 `8f1ad97f6f92360a62377cb96f537803d6c3836bbb013026d874ac7490d30738`），需上传至私有持久化存储；上传前仅存于采集机。
+   - **完整证据包独立归档**（已按负责人裁定完成上传）：`qomob/agenthub-evidence`（Private）`archives/m1/2026-11-12/agenthub-m1-acceptance-20261112.tar.zst`，SHA-256 `8298f372…`（**脱敏重打包版**：上传前安全扫描发现 24/42 张截图含本机第三方通知，已按门禁重新打包并重算哈希，首版 `8f1ad97f…` 作废；未脱敏原件不入任何仓库），远端下载复核 + `zstd -t` PASS。
    - **未脱敏原件不入库**：含第三方应用系统通知的 5 张原件隔离在 `docs/evidence/m1/quarantine/`，由 `.gitignore` 排除。
 2. ~~本报告是否作为 M1-C 阶段最终验收依据~~ → **已裁定**：负责人批准本报告作为 **M1 阶段最终验收依据**，M1 = PASS · CLOSED。
 
