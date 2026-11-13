@@ -109,7 +109,9 @@
 | # | 问题 | 修复 |
 |---|---|---|
 | P1 | `deltas_between()` 只检查字段齐全，带金额/币种/周期的 `usage` 记录会进模拟合计——取消它可能同时给出节省金额和「已排除」说明 | 引入 `foldable_parts()` 作为**唯一折算资格门**（usage/unknown 不可折算、free 记零、仅 active 参与），R2/R4 算术与 R5 缺口说明共用；模拟算术改用 `money::aggregate_currency()`（与成本卡一致）；缺口说明从「仅受影响」扩展为**所有不可折算的 active 记录**，使「排除」与「计入」永远一致 |
-| P2 | `today: None` 时引擎读系统时钟，跨午夜/时区结果不同 | 引擎**不再读时钟**：`build_report` 对未钉日期返回 `INVALID_INPUT`；service 层是唯一解析业务日期的地方 |
+| P2 | `today: None` 时引擎读系统时钟，跨午夜/时区结果不同 | 引擎**不再读时钟**：`build_report` 对未钉日期返回 `INVALID_INPUT`；service 层是唯一解析业务日期的地方（**复验通过**，commit `82b848f`） |
+| P1 二审 | `Replace` 补齐原缺失金额后记录进入 AFTER 合计，但说明仍按原始快照称其「已排除」——数字与文字矛盾 | 排除说明**按状态分别声明**：「Excluded from the BEFORE totals…」与「Excluded from the AFTER totals…」各自经同一 `foldable_parts` 门计算；记录补齐后自动从 AFTER 清单消失（**已修复**，commit `e0436f2`） |
+| 测试结构 | `r4_usage_with_amount…` 带重复 `#[test]`（执行两次，掩盖同块覆盖）；`r4_unknown_ids…` 丢失 `#[test]`（从未执行） | 两处属性已修正；并补上**真正的 Replace 用例**：原无金额订阅经 Replace 补齐后从 BEFORE 排除清单移入 AFTER 合计（delta +2000） |
 
 新增 5 项测试（含 replace 路径与无时钟规则），先 RED 后 GREEN；core 套件 169 passed。M2-B 范围确认采纳审查口径：GUI 建议面板、CLI `cost report/simulate`、Settings 参数管理，阈值与窗口走同一套 Service 校验与存储。
 
