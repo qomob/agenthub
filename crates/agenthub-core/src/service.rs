@@ -3505,6 +3505,21 @@ impl AgentHub {
     /// silent until a threshold is configured).
     pub fn optimizer_report(&self) -> Result<optimizer::OptimizerReport> {
         self.optimizer_report_with_config(optimizer::OptimizerConfig::default())
+            .or_else(|err| {
+                // The engine refuses to run without a pinned date (it must
+                // never read the system clock itself); the service layer is
+                // the one place that resolves the business date.
+                if matches!(err, crate::error::Error::InvalidInput(_))
+                    && err.to_string().contains("pin today")
+                {
+                    self.optimizer_report_with_config(optimizer::OptimizerConfig {
+                        today: Some(chrono::Local::now().date_naive()),
+                        ..optimizer::OptimizerConfig::default()
+                    })
+                } else {
+                    Err(err)
+                }
+            })
     }
 
     /// Same report with explicit rule parameters (R2 thresholds per currency,
@@ -3531,6 +3546,8 @@ impl AgentHub {
         actions: Vec<optimizer::ScenarioAction>,
         config: optimizer::OptimizerConfig,
     ) -> Result<optimizer::ScenarioResult> {
+        // Simulation needs no calendar date: it is pure arithmetic over the
+        // registered figures, so the engine receives the config as given.
         let items = self.stack_items()?;
         let subs: Vec<SubscriptionView> = self
             .db

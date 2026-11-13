@@ -50,8 +50,16 @@ impl OptimizerConfig {
         self.renewal_window_days.unwrap_or(7).clamp(1, 30)
     }
 
-    fn today(&self) -> chrono::NaiveDate {
-        self.today.unwrap_or_else(|| chrono::Local::now().date_naive())
+    /// The engine never reads the system clock: renewal classification must
+    /// replay identically for the same inputs regardless of when or where the
+    /// report runs. Callers (the service layer) resolve the business date and
+    /// pin it here; a missing date is an explicit input error.
+    fn pinned_today(&self) -> Result<chrono::NaiveDate> {
+        self.today.ok_or_else(|| {
+            crate::error::Error::invalid_input(
+                "optimizer config must pin today's date for deterministic replay",
+            )
+        })
     }
 }
 
@@ -165,17 +173,39 @@ fn deterministic_id(
 /// (missing amount/currency/period, usage without bills, unknown type).
 /// Hybrid subscriptions contribute their known fixed fee — the caller must
 /// surface the "floating part not counted" assumption.
-fn monthly_equivalent_of(sub: &SubscriptionView) -> Option<(String, i64)> {
-    if sub.status != "active" || sub.billing_type == "usage" || sub.billing_type == "unknown" {
+/// The foldable core of one subscription: currency, fixed-fee amount and
+/// billing period — or `None` when the record cannot fold.
+///
+/// This is THE single source of fold eligibility, shared by the R2/R4 money
+/// arithmetic and the R5 gap explanations, so a record can never be counted
+/// as savings while being reported as a gap (review P1):
+/// - only active records participate;
+/// - `usage` amounts are metered, never folded — even when amount, currency
+///   and period are all present;
+/// - `free` folds as a known zero (amount 0, annual-equivalent period);
+/// - `unknown` billing types cannot fold.
+fn foldable_parts(sub: &SubscriptionView) -> Option<(String, i64, BillingPeriod)> {
+    if sub.status != "active" {
         return None;
     }
-    if sub.billing_type == "free" {
-        // Known zero cost, not a gap.
-        return sub.currency.as_ref().map(|c| (c.clone(), 0));
+    match sub.billing_type.as_str() {
+        "free" => {
+            return sub.currency.as_ref().map(|c| {
+                (c.clone(), 0, BillingPeriod::parse("yearly").expect("yearly exists"))
+            });
+        }
+        "usage" | "unknown" => return None,
+        _ => {}
     }
     let amount = sub.amount_minor?;
     let currency = sub.currency.clone()?;
     let period = BillingPeriod::parse(sub.billing_period.as_deref()?)?;
+    Some((currency, amount, period))
+}
+
+/// Monthly-equivalent convenience over [`foldable_parts`].
+fn monthly_equivalent_of(sub: &SubscriptionView) -> Option<(String, i64)> {
+    let (currency, amount, period) = foldable_parts(sub)?;
     let monthly = money::monthly_equivalent(amount, period).ok()?;
     Some((currency, monthly))
 }
@@ -416,8 +446,8 @@ fn rule_r2_high_cost(
 fn rule_r3_renewals(
     subscriptions: &[SubscriptionView],
     config: &OptimizerConfig,
-) -> Vec<Recommendation> {
-    let today = config.today();
+) -> Result<Vec<Recommendation>> {
+    let today = config.pinned_today()?;
     let window = config.renewal_window();
     let window_end = today
         .checked_add_signed(chrono::Duration::days(window))
@@ -544,7 +574,7 @@ fn rule_r3_renewals(
             user_action_required: "complete_data".to_string(),
         });
     }
-    out
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -740,7 +770,6 @@ pub struct ScenarioResult {
 fn apply_actions(
     subscriptions: &[SubscriptionView],
     actions: &[ScenarioAction],
-    today: chrono::NaiveDate,
 ) -> Result<(Vec<SubscriptionView>, Vec<String>)> {
     let mut rows: Vec<SubscriptionView> = subscriptions.to_vec();
     let mut affected = Vec::new();
@@ -814,7 +843,6 @@ fn apply_actions(
                         "scenario references unknown stack item {stack_item_id}"
                     )));
                 }
-                let now = today.to_string();
                 for sub in rows
                     .iter_mut()
                     .filter(|s| s.stack_item_id == *stack_item_id && s.status == "active")
@@ -822,7 +850,6 @@ fn apply_actions(
                     sub.status = "cancelled".to_string();
                     affected.push(sub.id.clone());
                 }
-                let _ = now;
             }
         }
     }
@@ -835,29 +862,30 @@ fn deltas_between(
     before: &[SubscriptionView],
     after: &[SubscriptionView],
 ) -> Result<(Vec<MoneyDelta>, Vec<MoneyDelta>)> {
-    fn fold(subs: &[SubscriptionView]) -> Result<std::collections::BTreeMap<String, (i128, i128)>> {
-        let mut map: std::collections::BTreeMap<String, (i128, i128)> =
+    /// Fold through the SAME eligibility gate as every other rule
+    /// (`foldable_parts`) and the SAME arithmetic as the spending overview
+    /// (`money::aggregate_currency`), so a simulation can never count a
+    /// record the cost card or R5 would refuse to fold (review P1).
+    fn fold(
+        subs: &[SubscriptionView],
+    ) -> Result<std::collections::BTreeMap<String, money::CurrencyTotal>> {
+        let mut groups: std::collections::BTreeMap<String, Vec<money::CostLine>> =
             std::collections::BTreeMap::new();
         for sub in subs {
-            if sub.status != "active" {
-                continue;
-            }
-            if let (Some(amount), Some(currency), Some(period)) = (
-                sub.amount_minor,
-                sub.currency.clone(),
-                BillingPeriod::parse(sub.billing_period.as_deref().unwrap_or_default()),
-            ) {
-                let annual = (amount as i128) * 12 / (period.months() as i128);
-                let entry = map.entry(currency).or_insert((0, 0));
-                entry.0 = entry.0.checked_add(annual / 12).ok_or_else(|| {
-                    crate::error::Error::invalid_input("monthly total overflowed")
-                })?;
-                entry.1 = entry.1.checked_add(annual).ok_or_else(|| {
-                    crate::error::Error::invalid_input("annual total overflowed")
-                })?;
+            if let Some((currency, amount, period)) = foldable_parts(sub) {
+                groups.entry(currency).or_default().push(money::CostLine {
+                    amount_minor: amount,
+                    period,
+                });
             }
         }
-        Ok(map)
+        groups
+            .into_iter()
+            .map(|(currency, lines)| {
+                let total = money::aggregate_currency(&lines)?;
+                Ok((currency, total))
+            })
+            .collect()
     }
     let before = fold(before)?;
     let after = fold(after)?;
@@ -865,23 +893,31 @@ fn deltas_between(
     let mut annual = Vec::new();
     for currency in before.keys().chain(after.keys()).collect::<std::collections::BTreeSet<_>>() {
         let currency: &String = currency;
-        let (b_m, b_a) = before.get(currency).copied().unwrap_or((0, 0));
-        let (a_m, a_a) = after.get(currency).copied().unwrap_or((0, 0));
+        let before_total = before.get(currency).copied();
+        let after_total = after.get(currency).copied();
+        let (b_m, b_a) = match before_total {
+            Some(t) => (t.monthly_equivalent_minor, t.annual_equivalent_minor),
+            None => (0, 0),
+        };
+        let (a_m, a_a) = match after_total {
+            Some(t) => (t.monthly_equivalent_minor, t.annual_equivalent_minor),
+            None => (0, 0),
+        };
         if (b_m, b_a) == (a_m, a_a) {
             continue;
         }
         monthly.push(MoneyDelta {
             currency: (*currency).clone(),
-            minor_before: b_m as i64,
-            minor_after: a_m as i64,
-            delta_minor: (a_m - b_m) as i64,
+            minor_before: b_m,
+            minor_after: a_m,
+            delta_minor: a_m - b_m,
             period: "monthly".to_string(),
         });
         annual.push(MoneyDelta {
             currency: (*currency).clone(),
-            minor_before: b_a as i64,
-            minor_after: a_a as i64,
-            delta_minor: (a_a - b_a) as i64,
+            minor_before: b_a,
+            minor_after: a_a,
+            delta_minor: a_a - b_a,
             period: "annual".to_string(),
         });
     }
@@ -895,11 +931,10 @@ pub fn simulate(
     items: &[StackItemView],
     subscriptions: &[SubscriptionView],
     actions: &[ScenarioAction],
-    config: &OptimizerConfig,
+    _config: &OptimizerConfig,
     now: &str,
 ) -> Result<ScenarioResult> {
-    let today = config.today();
-    let (after_rows, affected) = apply_actions(subscriptions, actions, today)?;
+    let (after_rows, affected) = apply_actions(subscriptions, actions)?;
     let (monthly, annual) = deltas_between(subscriptions, &after_rows)?;
     let mut notes = vec![
         "This is a simulation only: no subscription was changed and no money was saved yet.".to_string(),
@@ -907,20 +942,30 @@ pub fn simulate(
     ];
     // Surface known data gaps among the affected subscriptions: the delta can
     // only cover subscriptions with complete folding facts.
+    // Gap notes share the SAME fold-eligibility gate as the arithmetic
+    // (review P1): every active record that cannot fold is named — whether or
+    // not it was touched — so "excluded" and "counted" can never disagree.
     let mut gaps: Vec<String> = Vec::new();
-    for id in &affected {
-        if let Some(sub) = subscriptions.iter().find(|s| &s.id == id) {
-            for gap in data_gaps(sub) {
-                gaps.push(format!("{} ({}): {}", id, sub.product_name, gap));
-            }
+    for sub in subscriptions {
+        if sub.status != "active" {
+            continue;
+        }
+        for gap in data_gaps(sub) {
+            gaps.push(format!("{} ({}): {}", sub.id, sub.product_name, gap));
         }
     }
     gaps.sort();
     gaps.dedup();
     if !gaps.is_empty() {
         notes.push(format!(
-            "Affected subscriptions with incomplete facts are excluded from the arithmetic: {}",
+            "Active subscriptions with incomplete facts are excluded from the arithmetic: {}",
             gaps.join("; ")
+        ));
+    }
+    if !affected.is_empty() {
+        notes.push(format!(
+            "Affected subscriptions: {}",
+            affected.join(", ")
         ));
     }
     // Stable recommendation-style record of the scenario itself.
@@ -966,11 +1011,11 @@ pub fn build_report(
     config: &OptimizerConfig,
     now: &str,
 ) -> Result<OptimizerReport> {
-    let today = config.today();
+    let today = config.pinned_today()?;
     let mut recommendations = Vec::new();
     recommendations.extend(rule_r1_overlap(items, subscriptions, today));
     recommendations.extend(rule_r2_high_cost(subscriptions, config));
-    recommendations.extend(rule_r3_renewals(subscriptions, config));
+    recommendations.extend(rule_r3_renewals(subscriptions, config)?);
     recommendations.extend(rule_r5_data_gaps(items, subscriptions, today));
     // Deterministic ordering: by type, then ID.
     recommendations.sort_by(|a, b| {
@@ -1279,6 +1324,99 @@ mod tests {
     }
 
     #[test]
+    /// RED (review P1): a `usage` record can carry amount/currency/period, but
+    /// its amount is metered, not a foldable fixed fee — the spending overview
+    /// and R5 both treat it as a gap. Cancelling it must therefore produce NO
+    /// delta, and the notes must name the gap once, consistently.
+    #[test]
+    fn r4_usage_with_amount_is_never_folded_and_always_reported_as_gap() {
+        let items = vec![item("a", "Alpha", None)];
+        let subs = vec![
+            sub("s1", "a", "Keep", "subscription", Some(1000), Some("USD"), Some("monthly"), None),
+            sub("s2", "a", "Metered", "usage", Some(9000), Some("USD"), Some("usage"), None),
+        ];
+        let result = simulate(
+            &items,
+            &subs,
+            &[ScenarioAction::Cancel { subscription_id: "s2".to_string() }],
+            &config(),
+            "now",
+        )
+        .unwrap();
+        assert_eq!(result.affected_subscriptions, vec!["s2".to_string()]);
+        // No foldable change: the metered record never entered the totals.
+        assert!(
+            result.deltas_monthly.is_empty(),
+            "deltas must stay empty, got {:?}",
+            result.deltas_monthly
+        );
+        assert!(result.deltas_annual.is_empty());
+        // The gap explanation must cover the same record, same reason.
+        assert!(result.notes.iter().any(|n| n.contains("usage_amount_not_foldable")));
+    }
+
+    /// RED (review P1, replace path): replacing into a configuration the
+    /// engine cannot fold must not invent savings either.
+    #[test]
+    fn r4_replace_keeps_eligibility_and_gap_notes_consistent() {
+        let items = vec![item("a", "Alpha", None)];
+        let subs = vec![
+            sub("s1", "a", "Fixed", "subscription", Some(5000), Some("USD"), Some("monthly"), None),
+            sub("s2", "a", "Metered", "usage", Some(9000), Some("USD"), Some("usage"), None),
+        ];
+        // Cancel the foldable one: the delta covers exactly that record. The
+        // untouched usage record never entered either total, so the stated
+        // saving is real arithmetic, not a metered amount masquerading as one.
+        let result = simulate(
+            &items,
+            &subs,
+            &[ScenarioAction::Cancel { subscription_id: "s1".to_string() }],
+            &config(),
+            "now",
+        )
+        .unwrap();
+        assert_eq!(result.deltas_monthly.len(), 1);
+        assert_eq!(result.deltas_monthly[0].minor_before, 5000);
+        assert_eq!(result.deltas_monthly[0].minor_after, 0);
+        assert_eq!(result.deltas_monthly[0].delta_minor, -5000);
+        // And the usage record is explicitly named as excluded.
+        assert!(result.notes.iter().any(|n| n.contains("usage_amount_not_foldable")));
+
+        // Reduce a foldable record while a usage record sits untouched: the
+        // delta covers only the foldable part, notes still name the gap.
+        let result = simulate(
+            &items,
+            &subs,
+            &[ScenarioAction::Reduce {
+                subscription_id: "s1".to_string(),
+                new_amount_minor: 2000,
+            }],
+            &config(),
+            "now",
+        )
+        .unwrap();
+        assert_eq!(result.deltas_monthly.len(), 1);
+        assert_eq!(result.deltas_monthly[0].delta_minor, -3000);
+        assert!(result.notes.iter().any(|n| n.contains("usage_amount_not_foldable")));
+    }
+
+    /// RED (review P2): the engine must never read the system clock — a
+    /// report without a pinned date is an error, so callers decide the date
+    /// and results replay deterministically.
+    #[test]
+    fn report_without_pinned_today_is_rejected() {
+        let items = vec![item("a", "Alpha", None)];
+        let subs = vec![sub(
+            "s1", "a", "Pro", "subscription", Some(1000), Some("USD"), Some("monthly"), None,
+        )];
+        let err = build_report(&items, &subs, &OptimizerConfig::default(), "now");
+        assert!(
+            matches!(err, Err(crate::error::Error::InvalidInput(_))),
+            "missing today must be an explicit input error, got {:?}",
+            err
+        );
+    }
+
     fn r4_unknown_ids_are_rejected_as_invalid_input() {
         let items = vec![item("a", "Alpha", None)];
         let subs = vec![sub("s1", "a", "Keep", "subscription", Some(1000), Some("USD"), Some("monthly"), None)];
