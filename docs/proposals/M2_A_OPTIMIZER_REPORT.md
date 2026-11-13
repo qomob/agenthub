@@ -115,6 +115,16 @@
 
 新增 5 项测试（含 replace 路径与无时钟规则），先 RED 后 GREEN；core 套件 169 passed。M2-B 范围确认采纳审查口径：GUI 建议面板、CLI `cost report/simulate`、Settings 参数管理，阈值与窗口走同一套 Service 校验与存储。
 
+## 10. M2-B 一审修正（commit `24084ff`）
+
+| # | 问题 | 修复 |
+|---|---|---|
+| P1-2 | `ScenarioAction` 枚举级 `rename_all` 只改变体名，变体体字段仍是 `subscription_id`，GUI 的 `subscriptionId` 会在 Tauri 反序列化失败 | 每个变体显式 `#[serde(rename_all = "camelCase")]`；新增 Rust 契约测试对四种动作做**序列化 + 反序列化往返**，逐字段断言 wire JSON |
+| P1-3 | Settings 写入绕过跨进程锁；CLI 先读再合并整张阈值表，并发时可能覆盖另一端 | `update_optimizer_settings` 的读取-合并-校验-保存整段放进 `runtime_guard`（持锁时写入 busy 失败、释放后成功——均有测试）；两个 key 在**同一 SQLite 事务**内原子保存；CLI 不再预合并，只发送用户改动的字段 |
+| P1-1 | GUI 无模拟入口/结果展示/Settings 编辑界面；测试直接调 vm 方法且断言的 60.00 来自模拟前文案 | 面板新增模拟区（订阅下拉来自 spending 概览桶的并集 + 点击运行）与结果区（币种、调整前后金额、差额）；新增 Settings 编辑器（阈值行 + 窗口），保存走与 CLI 相同的 service 校验路径；spending 改读 stack store（守 M1-C.1 缓存契约）；测试改为**点击驱动**（select → click → 断言渲染结果区），并断言无带数字的节省声称 |
+
+M2-B 验收矩阵 2.15（Potential ≠ Realized）留待 M2-C。
+
 ## 10. 遗留事项
 
 | # | 事项 | 处理 |
