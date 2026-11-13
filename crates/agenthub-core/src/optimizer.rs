@@ -940,27 +940,41 @@ pub fn simulate(
         "This is a simulation only: no subscription was changed and no money was saved yet.".to_string(),
         "Currencies are never summed together.".to_string(),
     ];
-    // Surface known data gaps among the affected subscriptions: the delta can
-    // only cover subscriptions with complete folding facts.
     // Gap notes share the SAME fold-eligibility gate as the arithmetic
-    // (review P1): every active record that cannot fold is named — whether or
-    // not it was touched — so "excluded" and "counted" can never disagree.
-    let mut gaps: Vec<String> = Vec::new();
-    for sub in subscriptions {
-        if sub.status != "active" {
-            continue;
+    // (review P1) AND are scoped per state (review round 2, P1): a Replace
+    // can fill in missing facts, so a record excluded from the BEFORE totals
+    // may well be counted in the AFTER totals. Each state gets its own,
+    // exact exclusion list — a blanket claim would contradict the figures.
+    fn exclusion_note(
+        label: &str,
+        subs: &[SubscriptionView],
+    ) -> Option<String> {
+        let mut gaps: Vec<String> = Vec::new();
+        for sub in subs {
+            if sub.status != "active" {
+                continue;
+            }
+            for gap in data_gaps(sub) {
+                gaps.push(format!("{} ({}): {}", sub.id, sub.product_name, gap));
+            }
         }
-        for gap in data_gaps(sub) {
-            gaps.push(format!("{} ({}): {}", sub.id, sub.product_name, gap));
+        gaps.sort();
+        gaps.dedup();
+        if gaps.is_empty() {
+            None
+        } else {
+            Some(format!(
+                "Excluded from the {} totals (incomplete facts): {}",
+                label,
+                gaps.join("; ")
+            ))
         }
     }
-    gaps.sort();
-    gaps.dedup();
-    if !gaps.is_empty() {
-        notes.push(format!(
-            "Active subscriptions with incomplete facts are excluded from the arithmetic: {}",
-            gaps.join("; ")
-        ));
+    if let Some(note) = exclusion_note("BEFORE", subscriptions) {
+        notes.push(note);
+    }
+    if let Some(note) = exclusion_note("AFTER", &after_rows) {
+        notes.push(note);
     }
     if !affected.is_empty() {
         notes.push(format!(
@@ -1323,7 +1337,6 @@ mod tests {
         assert_eq!(monthly["CNY"], (6800, 250, -6550));
     }
 
-    #[test]
     /// RED (review P1): a `usage` record can carry amount/currency/period, but
     /// its amount is metered, not a foldable fixed fee — the spending overview
     /// and R5 both treat it as a gap. Cancelling it must therefore produce NO
@@ -1357,6 +1370,56 @@ mod tests {
 
     /// RED (review P1, replace path): replacing into a configuration the
     /// engine cannot fold must not invent savings either.
+    /// RED (review round 2, P1): when a Replace fills in the facts a fixed
+    /// subscription was missing, the record becomes foldable AFTER the
+    /// simulation. The notes must therefore describe exclusion per state —
+    /// the record is excluded from the BEFORE totals but counted in the AFTER
+    /// totals — instead of a blanket "excluded" claim that contradicts the
+    /// arithmetic.
+    #[test]
+    fn r4_replace_filling_missing_facts_moves_the_record_into_the_after_totals() {
+        // A fixed subscription whose amount was never registered.
+        let incomplete = sub("s1", "a", "Unpriced", "subscription", None, Some("USD"), Some("monthly"), None);
+        let items = vec![item("a", "Alpha", None)];
+        let result = simulate(
+            &items,
+            &[incomplete],
+            &[ScenarioAction::Replace {
+                subscription_id: "s1".to_string(),
+                new_amount_minor: 2000,
+                new_currency: "USD".to_string(),
+                new_period: "monthly".to_string(),
+            }],
+            &config(),
+            "now",
+        )
+        .unwrap();
+        assert_eq!(result.affected_subscriptions, vec!["s1".to_string()]);
+        // Arithmetic: excluded before, counted after.
+        assert_eq!(result.deltas_monthly.len(), 1);
+        assert_eq!(result.deltas_monthly[0].minor_before, 0);
+        assert_eq!(result.deltas_monthly[0].minor_after, 2000);
+        assert_eq!(result.deltas_monthly[0].delta_minor, 2000);
+        // Notes must not claim the record is excluded from the arithmetic it
+        // now participates in.
+        let before_note = result
+            .notes
+            .iter()
+            .find(|n| n.contains("Excluded from the BEFORE totals"))
+            .expect("before-exclusion note required");
+        assert!(before_note.contains("s1"), "before note must name s1: {before_note}");
+        // No AFTER exclusion may exist at all — and certainly none that
+        // still names s1, which now folds into the AFTER totals.
+        for note in &result.notes {
+            if note.contains("Excluded from the AFTER totals") {
+                assert!(
+                    !note.contains("s1"),
+                    "after-exclusion note must not name s1: {note}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn r4_replace_keeps_eligibility_and_gap_notes_consistent() {
         let items = vec![item("a", "Alpha", None)];
@@ -1417,6 +1480,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn r4_unknown_ids_are_rejected_as_invalid_input() {
         let items = vec![item("a", "Alpha", None)];
         let subs = vec![sub("s1", "a", "Keep", "subscription", Some(1000), Some("USD"), Some("monthly"), None)];
