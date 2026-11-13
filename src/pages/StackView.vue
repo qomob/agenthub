@@ -4,6 +4,7 @@ import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 
 import BaseModal from '../components/BaseModal.vue'
+import CostInsights from '../components/CostInsights.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import EmptyState from '../components/EmptyState.vue'
 import ErrorBanner from '../components/ErrorBanner.vue'
@@ -459,6 +460,8 @@ function openDetail(item: StackItemView): void {
           </div>
         </article>
       </div>
+
+      <CostInsights style="margin-top: 14px" />
     </div>
 
     <BaseModal

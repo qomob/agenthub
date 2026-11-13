@@ -64,6 +64,81 @@ impl OptimizerConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Persisted rule parameters (M2-B): one storage format shared by GUI + CLI
+// ---------------------------------------------------------------------------
+
+/// The persisted, user-editable rule parameters. GUI and CLI both go through
+/// the same service validation and the same storage keys, so both surfaces
+/// always read one configuration.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct OptimizerSettings {
+    /// R2 review thresholds per currency in minor units. Empty = R2 silent.
+    pub cost_thresholds_minor: std::collections::BTreeMap<String, i64>,
+    /// R3 window in days; None = engine default (7). Valid range 1..=30.
+    pub renewal_window_days: Option<i64>,
+}
+
+/// Storage keys — a single namespace shared by every front end.
+pub const SETTINGS_KEY_THRESHOLDS: &str = "optimizer.cost_thresholds_minor";
+pub const SETTINGS_KEY_WINDOW: &str = "optimizer.renewal_window_days";
+
+impl OptimizerSettings {
+    /// Parse from the two storage keys. Unknown/invalid values are reported
+    /// as invalid input instead of being silently dropped.
+    pub fn load(get: &dyn Fn(&str) -> crate::error::Result<Option<String>>) -> Result<Self> {
+        let thresholds = match get(SETTINGS_KEY_THRESHOLDS)? {
+            None => Default::default(),
+            Some(raw) => serde_json::from_str::<std::collections::BTreeMap<String, i64>>(&raw)
+                .map_err(|e| {
+                    crate::error::Error::invalid_input(format!(
+                        "stored optimizer thresholds are not valid JSON: {e}"
+                    ))
+                })?,
+        };
+        let window = match get(SETTINGS_KEY_WINDOW)? {
+            // Empty string is the stored encoding of "cleared to default".
+            None => None,
+            Some(raw) if raw.trim().is_empty() => None,
+            Some(raw) => Some(raw.trim().parse::<i64>().map_err(|_| {
+                crate::error::Error::invalid_input(format!(
+                    "stored optimizer renewal window {raw:?} is not an integer"
+                ))
+            })?),
+        };
+        let settings = Self {
+            cost_thresholds_minor: thresholds,
+            renewal_window_days: window,
+        };
+        settings.validate()?;
+        Ok(settings)
+    }
+
+    /// Validate every field. The same rules run on read (corrupt storage is
+    /// an error, not a silent fallback) and on write (the user cannot store
+    /// anything the engine would reject).
+    pub fn validate(&self) -> Result<()> {
+        for (currency, threshold) in &self.cost_thresholds_minor {
+            money::validate_currency(currency)?;
+            money::validate_amount_minor(*threshold)?;
+            if *threshold <= 0 {
+                return Err(crate::error::Error::invalid_input(format!(
+                    "optimizer threshold for {currency} must be positive, got {threshold}"
+                )));
+            }
+        }
+        if let Some(window) = self.renewal_window_days {
+            if !(1..=30).contains(&window) {
+                return Err(crate::error::Error::invalid_input(format!(
+                    "optimizer renewal window must be 1-30 days, got {window}"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Output contract
 // ---------------------------------------------------------------------------
 
@@ -176,9 +251,10 @@ fn deterministic_id(
 /// The foldable core of one subscription: currency, fixed-fee amount and
 /// billing period — or `None` when the record cannot fold.
 ///
-/// This is THE single source of fold eligibility, shared by the R2/R4 money
-/// arithmetic and the R5 gap explanations, so a record can never be counted
-/// as savings while being reported as a gap (review P1):
+/// This is the eligibility gate for the money arithmetic (R2/R4). The R5 gap
+/// explanations use `data_gaps()`, a parallel view with the same match arms;
+/// the invariant that the two views agree is locked by
+/// `fold_eligibility_and_gap_explanations_stay_in_lockstep`:
 /// - only active records participate;
 /// - `usage` amounts are metered, never folded — even when amount, currency
 ///   and period are all present;
@@ -757,7 +833,7 @@ pub enum ScenarioAction {
 /// affected subscriptions. Nothing here is persisted (PRD: potential only).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ScenarioResult {
+pub struct OptimizerScenarioResult {
     pub generated_at: String,
     pub actions: Vec<ScenarioAction>,
     pub affected_subscriptions: Vec<String>,
@@ -933,7 +1009,7 @@ pub fn simulate(
     actions: &[ScenarioAction],
     _config: &OptimizerConfig,
     now: &str,
-) -> Result<ScenarioResult> {
+) -> Result<OptimizerScenarioResult> {
     let (after_rows, affected) = apply_actions(subscriptions, actions)?;
     let (monthly, annual) = deltas_between(subscriptions, &after_rows)?;
     let mut notes = vec![
@@ -1003,7 +1079,7 @@ pub fn simulate(
         .collect();
     let _ = deterministic_id("R4_SCENARIO", &item_ids, &sub_ids, "scenario");
     let _ = items;
-    Ok(ScenarioResult {
+    Ok(OptimizerScenarioResult {
         generated_at: now.to_string(),
         actions: actions.to_vec(),
         affected_subscriptions: affected,
@@ -1376,6 +1452,40 @@ mod tests {
     /// the record is excluded from the BEFORE totals but counted in the AFTER
     /// totals — instead of a blanket "excluded" claim that contradicts the
     /// arithmetic.
+
+    /// Review round 3: the arithmetic gate and the explanation gate are two
+    /// functions with the same arms; this invariant keeps them in lockstep
+    /// so a record can never be counted while being reported as a gap.
+    #[test]
+    fn fold_eligibility_and_gap_explanations_stay_in_lockstep() {
+        let cases: Vec<SubscriptionView> = vec![
+            sub("s1", "a", "Full", "subscription", Some(1000), Some("USD"), Some("monthly"), None),
+            sub("s2", "a", "NoAmount", "subscription", None, Some("USD"), Some("monthly"), None),
+            sub("s3", "a", "NoCurrency", "subscription", Some(1000), None, Some("monthly"), None),
+            sub("s4", "a", "NoPeriod", "subscription", Some(1000), Some("USD"), None, None),
+            sub("s5", "a", "Metered", "usage", Some(9000), Some("USD"), Some("usage"), None),
+            sub("s6", "a", "UnknownType", "unknown", None, None, None, None),
+            sub("s7", "a", "Free", "free", None, Some("USD"), None, None),
+        ];
+        let mut paused = sub("s8", "a", "Paused", "subscription", Some(1000), Some("USD"), Some("monthly"), None);
+        paused.status = "paused".to_string();
+        let cases: Vec<SubscriptionView> = cases.into_iter().chain(std::iter::once(paused)).collect();
+        for subview in &cases {
+            // Both call sites filter non-active records before invoking these
+            // gates, so the lockstep invariant applies to active rows only.
+            if subview.status != "active" {
+                continue;
+            }
+            let foldable = foldable_parts(subview).is_some();
+            let gapless = data_gaps(subview).is_empty();
+            assert_eq!(
+                foldable, gapless,
+                "eligibility and gap view disagree for {:?} ({}): foldable={foldable} gaps={:?}",
+                subview.billing_type, subview.product_name, data_gaps(subview)
+            );
+        }
+    }
+
     #[test]
     fn r4_replace_filling_missing_facts_moves_the_record_into_the_after_totals() {
         // A fixed subscription whose amount was never registered.

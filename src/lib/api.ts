@@ -52,6 +52,10 @@ import type {
   StackRefreshReport,
   SubscriptionUpsertRequest,
   SubscriptionView,
+  OptimizerReport,
+  OptimizerScenarioResult,
+  OptimizerSettings,
+  ScenarioAction,
   UninstallRequest,
   UpdateImpact,
   ValidationRequest,
@@ -304,6 +308,19 @@ export const api = {
     callApi<SubscriptionView>('subscription_upsert', { request }),
   subscriptionDelete: (id: string) => callApi<void>('subscription_delete', { id }),
   spendingOverview: () => callApi<SpendingOverview>('spending_overview'),
+  // Cost Optimizer (M2-B)
+  optimizerReport: () => callApi<OptimizerReport>('optimizer_report'),
+  optimizerSettings: () => callApi<OptimizerSettings>('optimizer_settings'),
+  optimizerUpdateSettings: (
+    costThresholdsMinor: Record<string, number> | undefined,
+    renewalWindowDays: number | null | undefined,
+  ) =>
+    callApi<OptimizerSettings>('optimizer_update_settings', {
+      cost_thresholds_minor: costThresholdsMinor,
+      renewal_window_days: renewalWindowDays,
+    }),
+  optimizerSimulate: (actions: ScenarioAction[]) =>
+    callApi<OptimizerScenarioResult>('optimizer_simulate', { actions }),
 }
 
 export type Api = typeof api

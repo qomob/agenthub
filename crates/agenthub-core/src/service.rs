@@ -3504,22 +3504,12 @@ impl AgentHub {
     /// currently runs with the default config (renewal window 7 days, R2
     /// silent until a threshold is configured).
     pub fn optimizer_report(&self) -> Result<optimizer::OptimizerReport> {
-        self.optimizer_report_with_config(optimizer::OptimizerConfig::default())
-            .or_else(|err| {
-                // The engine refuses to run without a pinned date (it must
-                // never read the system clock itself); the service layer is
-                // the one place that resolves the business date.
-                if matches!(err, crate::error::Error::InvalidInput(_))
-                    && err.to_string().contains("pin today")
-                {
-                    self.optimizer_report_with_config(optimizer::OptimizerConfig {
-                        today: Some(chrono::Local::now().date_naive()),
-                        ..optimizer::OptimizerConfig::default()
-                    })
-                } else {
-                    Err(err)
-                }
-            })
+        let settings = self.optimizer_settings()?;
+        self.optimizer_report_with_config(optimizer::OptimizerConfig {
+            cost_thresholds_minor: settings.cost_thresholds_minor,
+            renewal_window_days: settings.renewal_window_days,
+            today: Some(chrono::Local::now().date_naive()),
+        })
     }
 
     /// Same report with explicit rule parameters (R2 thresholds per currency,
@@ -3545,7 +3535,7 @@ impl AgentHub {
         &self,
         actions: Vec<optimizer::ScenarioAction>,
         config: optimizer::OptimizerConfig,
-    ) -> Result<optimizer::ScenarioResult> {
+    ) -> Result<optimizer::OptimizerScenarioResult> {
         // Simulation needs no calendar date: it is pure arithmetic over the
         // registered figures, so the engine receives the config as given.
         let items = self.stack_items()?;
@@ -3556,6 +3546,44 @@ impl AgentHub {
             .map(Self::subscription_view)
             .collect();
         optimizer::simulate(&items, &subs, &actions, &config, &crate::util::now())
+    }
+
+    /// Read the persisted optimizer rule parameters (M2-B). GUI and CLI both
+    /// call this; corrupt or invalid stored values are errors, never silent
+    /// fallbacks.
+    pub fn optimizer_settings(&self) -> Result<optimizer::OptimizerSettings> {
+        optimizer::OptimizerSettings::load(&|key| self.db.get_setting(key))
+    }
+
+    /// Validate and persist optimizer rule parameters. GUI and CLI share this
+    /// one validation path, so neither surface can store what the other
+    /// cannot read. Only provided fields change; omitted fields keep their
+    /// stored value.
+    pub fn update_optimizer_settings(
+        &self,
+        cost_thresholds_minor: Option<std::collections::BTreeMap<String, i64>>,
+        renewal_window_days: Option<Option<i64>>,
+    ) -> Result<optimizer::OptimizerSettings> {
+        let mut current = self.optimizer_settings()?;
+        if let Some(thresholds) = cost_thresholds_minor {
+            current.cost_thresholds_minor = thresholds;
+        }
+        if let Some(window) = renewal_window_days {
+            current.renewal_window_days = window;
+        }
+        current.validate()?;
+        self.db.set_setting(
+            optimizer::SETTINGS_KEY_THRESHOLDS,
+            &serde_json::to_string(&current.cost_thresholds_minor)
+                .map_err(|e| Error::invalid_input(format!("cannot serialize thresholds: {e}")))?,
+        )?;
+        match current.renewal_window_days {
+            Some(days) => self
+                .db
+                .set_setting(optimizer::SETTINGS_KEY_WINDOW, &days.to_string())?,
+            None => self.db.set_setting(optimizer::SETTINGS_KEY_WINDOW, "")?,
+        }
+        Ok(current)
     }
 
     pub fn spending_overview(&self) -> Result<SpendingOverview> {

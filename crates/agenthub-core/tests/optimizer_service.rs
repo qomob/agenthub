@@ -146,3 +146,67 @@ fn optimizer_simulate_rejects_unknown_subscription_as_invalid_input() {
         .unwrap_err();
     assert!(matches!(err, agenthub_core::error::Error::InvalidInput(_)));
 }
+
+#[test]
+fn optimizer_settings_roundtrip_shared_by_gui_and_cli() {
+    let f = Fixture::new();
+    let hub = f.hub();
+
+    // Default: R2 silent (no thresholds), R3 default window.
+    let settings = hub.optimizer_settings().unwrap();
+    assert!(settings.cost_thresholds_minor.is_empty());
+    assert_eq!(settings.renewal_window_days, None);
+
+    // Persist thresholds and a window; the same read must serve both surfaces.
+    let mut thresholds = std::collections::BTreeMap::new();
+    thresholds.insert("USD".to_string(), 5000i64);
+    let stored = hub
+        .update_optimizer_settings(Some(thresholds.clone()), Some(Some(14)))
+        .unwrap();
+    assert_eq!(stored.cost_thresholds_minor, thresholds);
+    assert_eq!(stored.renewal_window_days, Some(14));
+
+    let reread = hub.optimizer_settings().unwrap();
+    assert_eq!(reread, stored);
+
+    // The report must now use the persisted threshold (R2 fires).
+    hub.stack_upsert_item(item("Alpha", None)).unwrap();
+    let items = hub.stack_items().unwrap();
+    let a = items.iter().find(|i| i.name == "Alpha").unwrap().id.clone();
+    hub.subscription_upsert(sub(&a, Some(6000), Some("USD"))).unwrap();
+    let report = hub.optimizer_report().unwrap();
+    let r2 = report
+        .recommendations
+        .iter()
+        .find(|r| r.recommendation_type == "R2_HIGH_COST")
+        .expect("R2 must fire with the persisted threshold");
+    assert!(r2.explanation.contains("60.00 USD"));
+}
+
+#[test]
+fn optimizer_settings_validation_rejects_bad_parameters() {
+    let f = Fixture::new();
+    let hub = f.hub();
+
+    // Bad currency code.
+    let mut thresholds = std::collections::BTreeMap::new();
+    thresholds.insert("usdd".to_string(), 5000i64);
+    let err = hub.update_optimizer_settings(Some(thresholds), None).unwrap_err();
+    assert!(matches!(err, agenthub_core::error::Error::InvalidInput(_)));
+
+    // Non-positive threshold.
+    let mut thresholds = std::collections::BTreeMap::new();
+    thresholds.insert("USD".to_string(), 0i64);
+    let err = hub.update_optimizer_settings(Some(thresholds), None).unwrap_err();
+    assert!(matches!(err, agenthub_core::error::Error::InvalidInput(_)));
+
+    // Window out of range.
+    let err = hub
+        .update_optimizer_settings(None, Some(Some(31)))
+        .unwrap_err();
+    assert!(matches!(err, agenthub_core::error::Error::InvalidInput(_)));
+
+    // Window in range passes and clears back to default (None) explicitly.
+    hub.update_optimizer_settings(None, Some(None)).unwrap();
+    assert_eq!(hub.optimizer_settings().unwrap().renewal_window_days, None);
+}

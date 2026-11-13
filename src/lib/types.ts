@@ -1128,3 +1128,85 @@ export interface SpendingOverview {
   generatedAt: string
   upcomingWindowDays: number
 }
+
+// Cost Optimizer (M2-B) — mirrors crates/agenthub-core/src/optimizer.rs.
+
+export type RecommendationType =
+  | 'R1_OVERLAP'
+  | 'R2_HIGH_COST'
+  | 'R3_RENEWAL'
+  | 'R4_SCENARIO'
+  | 'R5_DATA_GAP'
+
+export type ConfidenceLevel = 'input_only' | 'user_configured' | 'derived_arithmetic'
+
+export type UserActionRequired = 'review' | 'complete_data' | 'none'
+
+export interface OptimizerEvidence {
+  kind: string
+  description: string
+  sourceRef: string
+}
+
+export interface OptimizerMoneyDelta {
+  currency: string
+  minorBefore: number
+  minorAfter: number
+  deltaMinor: number
+  /** monthly | annual */
+  period: string
+}
+
+export interface OptimizerRecommendation {
+  recommendationId: string
+  recommendationType: RecommendationType
+  title: string
+  explanation: string
+  relatedStackItems: string[]
+  relatedSubscriptions: string[]
+  evidence: OptimizerEvidence[]
+  missingInformation: string[]
+  assumptions: string[]
+  estimatedImpact: OptimizerMoneyDelta | null
+  currency: string | null
+  confidenceOrEvidenceLevel: ConfidenceLevel
+  userActionRequired: UserActionRequired
+}
+
+export interface OptimizerReport {
+  generatedAt: string
+  recommendations: OptimizerRecommendation[]
+  counts: {
+    stackItems: number
+    subscriptionsTotal: number
+    subscriptionsActive: number
+    recommendations: number
+    dataGaps: number
+  }
+}
+
+export interface OptimizerSettings {
+  costThresholdsMinor: Record<string, number>
+  renewalWindowDays: number | null
+}
+
+export type ScenarioAction =
+  | { kind: 'cancel'; subscriptionId: string }
+  | { kind: 'reduce'; subscriptionId: string; newAmountMinor: number }
+  | {
+      kind: 'replace'
+      subscriptionId: string
+      newAmountMinor: number
+      newCurrency: string
+      newPeriod: string
+    }
+  | { kind: 'deactivateItem'; stackItemId: string }
+
+export interface OptimizerScenarioResult {
+  generatedAt: string
+  actions: ScenarioAction[]
+  affectedSubscriptions: string[]
+  deltasMonthly: OptimizerMoneyDelta[]
+  deltasAnnual: OptimizerMoneyDelta[]
+  notes: string[]
+}

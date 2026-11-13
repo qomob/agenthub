@@ -2161,3 +2161,19 @@ a.stat-card:hover {
     scroll-behavior: auto !important;
   }
 }
+
+/* Cost insights (M2-B) */
+.insight-list {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.insight-item {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  background: var(--surface-inset, rgba(127, 127, 127, 0.04));
+}

@@ -123,6 +123,45 @@ enum Commands {
         #[command(subcommand)]
         command: SubCommand,
     },
+    /// Cost Optimizer (M2-B): read-only recommendations and scenario math.
+    Cost {
+        #[command(subcommand)]
+        command: CostCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum CostCommand {
+    /// Print optimizer recommendations (read-only). Reads the shared
+    /// threshold/window settings; write nothing.
+    Report,
+    /// Simulate scenario actions (read-only arithmetic, nothing persisted).
+    /// Repeatable flags:
+    ///   --cancel <subscription_id>
+    ///   --reduce <subscription_id>:<new_amount_minor>
+    ///   --replace <subscription_id>:<new_amount_minor>:<CURRENCY>:<period>
+    ///   --deactivate <stack_item_id>
+    Simulate {
+        #[arg(long = "cancel")]
+        cancel: Vec<String>,
+        #[arg(long = "reduce")]
+        reduce: Vec<String>,
+        #[arg(long = "replace")]
+        replace: Vec<String>,
+        #[arg(long = "deactivate")]
+        deactivate: Vec<String>,
+    },
+    /// Show the persisted optimizer settings (shared by GUI and CLI).
+    Settings,
+    /// Update optimizer settings (shared validation with the GUI).
+    ///   --threshold <CURRENCY:minor> (repeatable; empty --threshold "" clears all)
+    ///   --window <days> (1-30; omit to keep; `--window default` clears)
+    Set {
+        #[arg(long = "threshold")]
+        threshold: Vec<String>,
+        #[arg(long = "window")]
+        window: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -911,6 +950,17 @@ fn run(cli: Cli) -> CliResult<u8> {
             SubCommand::Add(args) => cmd_sub_add(&ctx, &args),
             SubCommand::Edit(args) => cmd_sub_edit(&ctx, &args),
             SubCommand::Delete { id, yes } => cmd_sub_delete(&ctx, &id, yes),
+        },
+        Commands::Cost { command } => match command {
+            CostCommand::Report => cmd_cost_report(&ctx),
+            CostCommand::Simulate {
+                cancel,
+                reduce,
+                replace,
+                deactivate,
+            } => cmd_cost_simulate(&ctx, &cancel, &reduce, &replace, &deactivate),
+            CostCommand::Settings => cmd_cost_settings(&ctx),
+            CostCommand::Set { threshold, window } => cmd_cost_set(&ctx, &threshold, window),
         },
     }
 }
@@ -2906,4 +2956,202 @@ fn cmd_sub_delete(ctx: &Ctx, id: &str, yes: bool) -> CliResult<u8> {
         println!("Subscription deleted: {id}");
     }
     Ok(EXIT_OK)
+}
+
+// -- Cost Optimizer (M2-B) ---------------------------------------------------
+
+fn print_recommendation(rec: &agenthub_core::optimizer::Recommendation) {
+    println!("[{}] {}", rec.recommendation_type, rec.title);
+    println!("  id: {}", rec.recommendation_id);
+    println!("  confidence: {}", rec.confidence_or_evidence_level);
+    println!("  action: {}", rec.user_action_required);
+    if !rec.missing_information.is_empty() {
+        println!("  missing: {}", rec.missing_information.join(", "));
+    }
+    println!("  {}", rec.explanation.replace('\n', "\n  "));
+    println!();
+}
+
+fn cmd_cost_report(ctx: &Ctx) -> CliResult<u8> {
+    let report = api_call(ApiContext::Inspect, ctx.hub.optimizer_report())?;
+    if ctx.json {
+        ctx.emit_api_success(&report)?;
+        return Ok(EXIT_OK);
+    }
+    if report.recommendations.is_empty() {
+        println!("No recommendations. Everything the rules need is in place.");
+    } else {
+        for rec in &report.recommendations {
+            print_recommendation(rec);
+        }
+    }
+    Ok(EXIT_OK)
+}
+
+fn parse_reduce(spec: &str) -> CliResult<(String, i64)> {
+    let (id, amount) = spec
+        .split_once(':')
+        .ok_or_else(|| CliError::invalid_input("--reduce expects <subscription_id>:<new_amount_minor>"))?;
+    let amount: i64 = amount.trim().parse().map_err(|_| {
+        CliError::invalid_input(format!("--reduce amount {amount:?} is not an integer"))
+    })?;
+    Ok((id.trim().to_string(), amount))
+}
+
+fn parse_replace(spec: &str) -> CliResult<(String, i64, String, String)> {
+    let parts: Vec<&str> = spec.split(':').collect();
+    if parts.len() != 4 {
+        return Err(CliError::invalid_input(
+            "--replace expects <subscription_id>:<amount_minor>:<CURRENCY>:<period>",
+        ));
+    }
+    let amount: i64 = parts[1].trim().parse().map_err(|_| {
+        CliError::invalid_input(format!("--replace amount {:?} is not an integer", parts[1]))
+    })?;
+    Ok((
+        parts[0].trim().to_string(),
+        amount,
+        parts[2].trim().to_uppercase(),
+        parts[3].trim().to_lowercase(),
+    ))
+}
+
+fn cmd_cost_simulate(
+    ctx: &Ctx,
+    cancel: &[String],
+    reduce: &[String],
+    replace: &[String],
+    deactivate: &[String],
+) -> CliResult<u8> {
+    let mut actions: Vec<agenthub_core::optimizer::ScenarioAction> = Vec::new();
+    for id in cancel {
+        actions.push(agenthub_core::optimizer::ScenarioAction::Cancel {
+            subscription_id: id.trim().to_string(),
+        });
+    }
+    for spec in reduce {
+        let (id, amount) = parse_reduce(spec)?;
+        actions.push(agenthub_core::optimizer::ScenarioAction::Reduce {
+            subscription_id: id,
+            new_amount_minor: amount,
+        });
+    }
+    for spec in replace {
+        let (id, amount, currency, period) = parse_replace(spec)?;
+        actions.push(agenthub_core::optimizer::ScenarioAction::Replace {
+            subscription_id: id,
+            new_amount_minor: amount,
+            new_currency: currency,
+            new_period: period,
+        });
+    }
+    for id in deactivate {
+        actions.push(agenthub_core::optimizer::ScenarioAction::DeactivateItem {
+            stack_item_id: id.trim().to_string(),
+        });
+    }
+    let result = api_call(ApiContext::Inspect, ctx.hub.optimizer_simulate(actions, agenthub_core::optimizer::OptimizerConfig::default()))?;
+    if ctx.json {
+        ctx.emit_api_success(&result)?;
+        return Ok(EXIT_OK);
+    }
+    println!("Simulation only — nothing was changed and nothing is saved yet.");
+    for delta in &result.deltas_monthly {
+        println!(
+            "  monthly {currency}: {before} -> {after} (delta {delta})",
+            currency = delta.currency,
+            before = delta.minor_before,
+            after = delta.minor_after,
+            delta = delta.delta_minor
+        );
+    }
+    for delta in &result.deltas_annual {
+        println!(
+            "  annual  {currency}: {before} -> {after} (delta {delta})",
+            currency = delta.currency,
+            before = delta.minor_before,
+            after = delta.minor_after,
+            delta = delta.delta_minor
+        );
+    }
+    for note in &result.notes {
+        println!("  note: {note}");
+    }
+    Ok(EXIT_OK)
+}
+
+fn cmd_cost_settings(ctx: &Ctx) -> CliResult<u8> {
+    let settings = api_call(ApiContext::Inspect, ctx.hub.optimizer_settings())?;
+    if ctx.json {
+        ctx.emit_api_success(&settings)?;
+        return Ok(EXIT_OK);
+    }
+    if settings.cost_thresholds_minor.is_empty() {
+        println!("cost thresholds: (none configured — R2 is silent)");
+    } else {
+        println!("cost thresholds:");
+        for (currency, minor) in &settings.cost_thresholds_minor {
+            println!("  {currency}: {minor} minor units / month");
+        }
+    }
+    println!(
+        "renewal window: {}",
+        settings
+            .renewal_window_days
+            .map(|d| d.to_string())
+            .unwrap_or_else(|| "default (7 days)".to_string())
+    );
+    Ok(EXIT_OK)
+}
+
+fn cmd_cost_set(ctx: &Ctx, thresholds: &[String], window: Option<String>) -> CliResult<u8> {
+    let mut map: std::collections::BTreeMap<String, i64> = ctx
+        .hub
+        .optimizer_settings()
+        .map_err(|e| CliError::invalid_input(format!("cannot read current settings: {e}")))?
+        .cost_thresholds_minor;
+    let mut clear_all = false;
+    for spec in thresholds {
+        let spec = spec.trim();
+        if spec.is_empty() {
+            clear_all = true;
+            continue;
+        }
+        let (currency, minor) = spec
+            .split_once(':')
+            .ok_or_else(|| CliError::invalid_input("--threshold expects <CURRENCY:minor>, e.g. USD:5000"))?;
+        let minor: i64 = minor.trim().parse().map_err(|_| {
+            CliError::invalid_input(format!("--threshold value {minor:?} is not an integer"))
+        })?;
+        map.insert(currency.trim().to_uppercase(), minor);
+    }
+    if clear_all {
+        map.clear();
+    }
+    // Option<Option<i64>>: outer None = leave unchanged; inner None = clear
+    // back to the engine default; Some(days) = set the window.
+    let window_arg: Option<Option<i64>> = match window.as_deref() {
+        None => None,
+        Some(raw) => {
+            let raw = raw.trim();
+            if raw.eq_ignore_ascii_case("default") || raw.is_empty() {
+                Some(None)
+            } else {
+                let days: i64 = raw
+                    .parse()
+                    .map_err(|_| CliError::invalid_input(format!("--window value {raw:?} is not an integer")))?;
+                Some(Some(days))
+            }
+        }
+    };
+    let stored = api_call(
+        ApiContext::Inspect,
+        ctx.hub.update_optimizer_settings(Some(map), window_arg),
+    )?;
+    if ctx.json {
+        ctx.emit_api_success(&stored)?;
+        return Ok(EXIT_OK);
+    }
+    println!("Optimizer settings updated.");
+    cmd_cost_settings(ctx)
 }

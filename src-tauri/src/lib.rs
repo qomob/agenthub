@@ -8,6 +8,10 @@ use std::sync::Mutex;
 
 use agenthub_core::contract::{ApiError, ApiResult, ErrorCode};
 use agenthub_core::model::*;
+use agenthub_core::optimizer::{
+    OptimizerReport, OptimizerScenarioResult, OptimizerSettings,
+    ScenarioAction,
+};
 use agenthub_core::{AgentHub, CoreConfig};
 use tauri::State;
 
@@ -620,6 +624,42 @@ fn spending_overview(state: State<'_, AppState>) -> ApiResult<SpendingOverview> 
     state.run_api(|hub| hub.spending_overview())
 }
 
+// Cost Optimizer (M2-B): read-only report and simulation, plus the shared
+// settings store used by both the GUI and the CLI.
+#[tauri::command(rename_all = "snake_case")]
+fn optimizer_report(state: State<'_, AppState>) -> ApiResult<OptimizerReport> {
+    state.run_api(|hub| hub.optimizer_report())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+fn optimizer_settings(state: State<'_, AppState>) -> ApiResult<OptimizerSettings> {
+    state.run_api(|hub| hub.optimizer_settings())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+fn optimizer_update_settings(
+    state: State<'_, AppState>,
+    cost_thresholds_minor: Option<std::collections::BTreeMap<String, i64>>,
+    renewal_window_days: Option<Option<i64>>,
+) -> ApiResult<OptimizerSettings> {
+    state.run_api(|hub| {
+        hub.update_optimizer_settings(cost_thresholds_minor, renewal_window_days)
+    })
+}
+
+#[tauri::command(rename_all = "snake_case")]
+fn optimizer_simulate(
+    state: State<'_, AppState>,
+    actions: Vec<ScenarioAction>,
+) -> ApiResult<OptimizerScenarioResult> {
+    state.run_api(|hub| {
+        hub.optimizer_simulate(
+            actions,
+            agenthub_core::optimizer::OptimizerConfig::default(),
+        )
+    })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let state = AppState::new();
@@ -693,7 +733,11 @@ pub fn run() {
             stack_refresh_detections,
             subscription_upsert,
             subscription_delete,
-            spending_overview
+            spending_overview,
+            optimizer_report,
+            optimizer_settings,
+            optimizer_update_settings,
+            optimizer_simulate
         ])
         .run(tauri::generate_context!())
         .expect("error while running AgentHub");

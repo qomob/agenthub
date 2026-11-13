@@ -111,6 +111,33 @@ const fixtures = vi.hoisted(() => {
     subscriptionUpsert: vi.fn(async () => subscription()),
     subscriptionDelete: vi.fn(async () => undefined),
     spendingOverview: vi.fn(async () => spending()),
+    optimizerReport: vi.fn(async () => ({
+      generatedAt: '2026-11-11T00:00:00Z',
+      recommendations: [],
+      counts: {
+        stackItems: 2,
+        subscriptionsTotal: 2,
+        subscriptionsActive: 2,
+        recommendations: 0,
+        dataGaps: 0,
+      },
+    })),
+    optimizerSettings: vi.fn(async () => ({
+      costThresholdsMinor: {},
+      renewalWindowDays: null,
+    })),
+    optimizerUpdateSettings: vi.fn(async () => ({
+      costThresholdsMinor: {},
+      renewalWindowDays: null,
+    })),
+    optimizerSimulate: vi.fn(async () => ({
+      generatedAt: '2026-11-11T00:00:00Z',
+      actions: [],
+      affectedSubscriptions: [],
+      deltasMonthly: [],
+      deltasAnnual: [],
+      notes: ['This is a simulation only'],
+    })),
   }
 
   return { item, subscription, spending, stackGetDetail, apiMock }
