@@ -102,7 +102,18 @@
 - **哈希变更如实登记**：上传前扫描发现 42 张原始截图中 24 张混入本机第三方应用通知、且首版包含未脱敏原件，按门禁重新打包并重算哈希；首版 `8f1ad97f…` 作废。未脱敏原件不入任何仓库，仅存采集机。
 - 主仓库 `docs/evidence/m1/README.md` 已登记 Storage/Repository/Object/SHA-256/Commit/Verification/Access/Status 八项及哈希变更原因（commit `ea2429f`、`c51bb7b`）。
 
-## 9. 遗留事项
+## 9. 审查修正（commit `82b848f`）
+
+负责人 M2-A 审查指出两项问题，均已修复并测试锁定：
+
+| # | 问题 | 修复 |
+|---|---|---|
+| P1 | `deltas_between()` 只检查字段齐全，带金额/币种/周期的 `usage` 记录会进模拟合计——取消它可能同时给出节省金额和「已排除」说明 | 引入 `foldable_parts()` 作为**唯一折算资格门**（usage/unknown 不可折算、free 记零、仅 active 参与），R2/R4 算术与 R5 缺口说明共用；模拟算术改用 `money::aggregate_currency()`（与成本卡一致）；缺口说明从「仅受影响」扩展为**所有不可折算的 active 记录**，使「排除」与「计入」永远一致 |
+| P2 | `today: None` 时引擎读系统时钟，跨午夜/时区结果不同 | 引擎**不再读时钟**：`build_report` 对未钉日期返回 `INVALID_INPUT`；service 层是唯一解析业务日期的地方 |
+
+新增 5 项测试（含 replace 路径与无时钟规则），先 RED 后 GREEN；core 套件 169 passed。M2-B 范围确认采纳审查口径：GUI 建议面板、CLI `cost report/simulate`、Settings 参数管理，阈值与窗口走同一套 Service 校验与存储。
+
+## 10. 遗留事项
 
 | # | 事项 | 处理 |
 |---|---|---|
