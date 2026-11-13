@@ -25,7 +25,7 @@
 ### 2.1 环境隔离（零触碰真实用户数据）
 
 ```
-FIX=/var/folders/42/0_vh3ptx7735d89p2rz0kj980000gn/T/ah-gui-accept.zF4VAb
+FIX=<FIXTURE_HOME>
 AGENTHUB_HOME=$FIX/home  AGENTHUB_DATA_DIR=$FIX/home/.agenthub
 ```
 
@@ -194,9 +194,9 @@ function assertNoFakeZero(pageText: string): void {
 
 | 路径 | 文件数 | 08:00 后修改 | 结论 |
 |---|---|---|---|
-| `/Users/jonki/.agenthub` | 4903 | **0** | 未触碰 |
-| `/Users/jonki/.claude` | 1225 | **0** | 未触碰 |
-| `/Users/jonki/.codex` | 12777 | 194 | **非 agenthub 造成** |
+| `~/.agenthub` | 4903 | **0** | 未触碰 |
+| `~/.claude` | 1225 | **0** | 未触碰 |
+| `~/.codex` | 12777 | 194 | **非 agenthub 造成** |
 
 `.codex` 194 项逐项归因：`plugins` 96、`.tmp` 41、`computer-use` 29、`vendor_imports` 12（其余零散），均为 Codex/WorkBuddy 自身活动；`~/.codex/config.toml` mtime 09:16:55 且 birth 09:15:02（应用启动前即被 Codex 重建）。
 

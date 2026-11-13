@@ -173,7 +173,7 @@ Tests  29 passed (29)
 
 ## 7. 真实 GUI 复验（隔离 fixture）
 
-环境：`FIX=/var/folders/42/.../ah-gui-accept.zF4VAb`，`AGENTHUB_HOME=$FIX/home`；dev server 1420 + 桌面二进制 `/tmp/ahdesk/agenthub`。截图目录 `$FIX/shots3/`（全分辨率 2720×1754，数字均按 ×2.72 裁剪核对）。
+环境：`FIX=<FIXTURE_HOME>`，`AGENTHUB_HOME=$FIX/home`；dev server 1420 + 桌面二进制 `/tmp/ahdesk/agenthub`。截图目录 `$FIX/shots3/`（全分辨率 2720×1754，数字均按 ×2.72 裁剪核对）。
 
 ### 复现 A（CLI 外部写入 → GUI 重进）
 

@@ -27,7 +27,7 @@
 
 | 项 | 值 |
 |---|---|
-| 隔离 home | `FIX=/var/folders/42/0_vh3ptx7735d89p2rz0kj980000gn/T//ah-gui-accept.zF4VAb` |
+| 隔离 home | `FIX=<FIXTURE_HOME>` |
 | 数据目录 | `$FIX/home/.agenthub/agenthub.db`（lsof 确认进程只打开此库及 -wal/-shm） |
 | 启动方式 | `AGENTHUB_HOME=$FIX/home AGENTHUB_DATA_DIR=$FIX/home/.agenthub /tmp/ahdesk/agenthub` |
 | 前端 | `pnpm dev`（Vite 1420，`/tmp/ah_vite.log`），Tauri 走 devUrl |
@@ -311,7 +311,7 @@ v0.6.0 发布         FROZEN（未打 tag、未发布）
 
 ```bash
 # 隔离环境
-FIX=/var/folders/42/0_vh3ptx7735d89p2rz0kj980000gn/T//ah-gui-accept.zF4VAb
+FIX=<FIXTURE_HOME>
 pnpm dev &                                   # Vite 1420
 AGENTHUB_HOME=$FIX/home AGENTHUB_DATA_DIR=$FIX/home/.agenthub /tmp/ahdesk/agenthub &
 
