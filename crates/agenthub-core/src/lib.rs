@@ -22,6 +22,7 @@ pub mod scan;
 pub mod service;
 pub mod skill;
 pub mod util;
+pub mod optimizer;
 pub mod validation;
 
 pub use error::{Error, Result};

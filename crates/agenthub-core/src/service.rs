@@ -14,6 +14,7 @@ use crate::db::{
 use crate::error::{Error, Result};
 use crate::library::{self, Library};
 use crate::money;
+use crate::optimizer;
 use crate::model::*;
 use crate::ops::{
     approval_expiry_from_now, current_target_hash, plan_digest, Executor, APPROVAL_TTL_MINUTES,
@@ -3496,6 +3497,50 @@ impl AgentHub {
     }
 
     /// Spending overview with the default renewal look-ahead window.
+    /// Cost Optimizer report (M2-A). Read-only: the rules engine is a pure
+    /// function over the registered data and never touches the database or
+    /// any agent directory. M2-A ships the engine and the read path; the
+    /// thresholds/window configuration UI arrives with M2-B, so the report
+    /// currently runs with the default config (renewal window 7 days, R2
+    /// silent until a threshold is configured).
+    pub fn optimizer_report(&self) -> Result<optimizer::OptimizerReport> {
+        self.optimizer_report_with_config(optimizer::OptimizerConfig::default())
+    }
+
+    /// Same report with explicit rule parameters (R2 thresholds per currency,
+    /// R3 window in days, frozen "today" for tests).
+    pub fn optimizer_report_with_config(
+        &self,
+        config: optimizer::OptimizerConfig,
+    ) -> Result<optimizer::OptimizerReport> {
+        let items = self.stack_items()?;
+        let subs: Vec<SubscriptionView> = self
+            .db
+            .list_subscriptions()?
+            .into_iter()
+            .map(Self::subscription_view)
+            .collect();
+        optimizer::build_report(&items, &subs, &config, &crate::util::now())
+    }
+
+    /// Scenario simulation (M2-A, R4). Pure arithmetic over the registered
+    /// figures; nothing is written to the database and the result must never
+    /// be presented as a realized saving (PRD §3).
+    pub fn optimizer_simulate(
+        &self,
+        actions: Vec<optimizer::ScenarioAction>,
+        config: optimizer::OptimizerConfig,
+    ) -> Result<optimizer::ScenarioResult> {
+        let items = self.stack_items()?;
+        let subs: Vec<SubscriptionView> = self
+            .db
+            .list_subscriptions()?
+            .into_iter()
+            .map(Self::subscription_view)
+            .collect();
+        optimizer::simulate(&items, &subs, &actions, &config, &crate::util::now())
+    }
+
     pub fn spending_overview(&self) -> Result<SpendingOverview> {
         self.spending_overview_with_window(money::DEFAULT_UPCOMING_WINDOW_DAYS)
     }
