@@ -809,16 +809,25 @@ fn rule_r5_data_gaps(
 /// One simulated change (PRD §R4). The engine only does arithmetic on
 /// figures the user already registered or supplies here.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// One simulated change (PRD §R4). Wire format is part of the frozen GUI/CLI
+/// contract: `tag = "kind"` names the variant and every variant body field is
+/// camelCase — `rename_all` on the enum alone renames variant NAMES but NOT
+/// variant body FIELDS, which is exactly the mismatch the M2-B review caught.
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum ScenarioAction {
     /// Cancel one subscription entirely.
-    Cancel { subscription_id: String },
+    #[serde(rename_all = "camelCase")]
+    Cancel {
+        subscription_id: String,
+    },
     /// Lower the amount of a known subscription (same currency/period).
+    #[serde(rename_all = "camelCase")]
     Reduce {
         subscription_id: String,
         new_amount_minor: i64,
     },
     /// Swap to a user-supplied alternative plan (new amount/currency/period).
+    #[serde(rename_all = "camelCase")]
     Replace {
         subscription_id: String,
         new_amount_minor: i64,
@@ -826,6 +835,7 @@ pub enum ScenarioAction {
         new_period: String,
     },
     /// Deactivate every subscription registered on one tool.
+    #[serde(rename_all = "camelCase")]
     DeactivateItem { stack_item_id: String },
 }
 
@@ -1134,6 +1144,7 @@ pub fn build_report(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
 
     fn item(id: &str, name: &str, overlap: Option<&str>) -> StackItemView {
         StackItemView {
@@ -1456,6 +1467,79 @@ mod tests {
     /// Review round 3: the arithmetic gate and the explanation gate are two
     /// functions with the same arms; this invariant keeps them in lockstep
     /// so a record can never be counted while being reported as a gap.
+
+    /// M2-B review P1-2: the four scenario actions are a frozen JSON contract
+    /// shared by the GUI, the CLI and the Tauri layer. Rust's enum-level
+    /// `rename_all` does NOT touch variant body fields, so each variant pins
+    /// its own casing — this test is the executable form of that contract.
+    #[test]
+    fn scenario_actions_serialize_with_camel_case_body_fields() {
+        let cases: Vec<(ScenarioAction, Value)> = vec![
+            (
+                ScenarioAction::Cancel {
+                    subscription_id: "s1".to_string(),
+                },
+                serde_json::json!({"kind": "cancel", "subscriptionId": "s1"}),
+            ),
+            (
+                ScenarioAction::Reduce {
+                    subscription_id: "s1".to_string(),
+                    new_amount_minor: 2000,
+                },
+                serde_json::json!({
+                    "kind": "reduce",
+                    "subscriptionId": "s1",
+                    "newAmountMinor": 2000
+                }),
+            ),
+            (
+                ScenarioAction::Replace {
+                    subscription_id: "s1".to_string(),
+                    new_amount_minor: 2000,
+                    new_currency: "USD".to_string(),
+                    new_period: "monthly".to_string(),
+                },
+                serde_json::json!({
+                    "kind": "replace",
+                    "subscriptionId": "s1",
+                    "newAmountMinor": 2000,
+                    "newCurrency": "USD",
+                    "newPeriod": "monthly"
+                }),
+            ),
+            (
+                ScenarioAction::DeactivateItem {
+                    stack_item_id: "a".to_string(),
+                },
+                serde_json::json!({"kind": "deactivateItem", "stackItemId": "a"}),
+            ),
+        ];
+        for (action, expected) in cases {
+            let serialized = serde_json::to_value(&action).expect("serialize action");
+            assert_eq!(
+                serialized, expected,
+                "action wire format drifted: {serialized} != {expected}"
+            );
+            // Round-trip: the GUI's payload must deserialize back unchanged.
+            let round: ScenarioAction =
+                serde_json::from_value(expected.clone()).expect("deserialize action");
+            assert_eq!(round, action, "round-trip mismatch for {expected}");
+        }
+    }
+
+    /// Scope note (review round 4): the lockstep invariant covers every
+    /// active record EXCEPT the documented usage-without-amount case, where
+    /// neither gate applies on purpose — such records are not foldable AND
+    /// carry no gap (they surface in the separate `usage_without_bills`
+    /// bucket, per spending-overview semantics), so "not foldable" agreeing
+    /// with "no gap" is correct, not a drift. Pinned below explicitly.
+    #[test]
+    fn usage_without_amount_is_neither_foldable_nor_a_gap() {
+        let metered = sub("s9", "a", "MeteredNoBills", "usage", None, None, Some("usage"), None);
+        assert!(foldable_parts(&metered).is_none());
+        assert!(data_gaps(&metered).is_empty());
+    }
+
     #[test]
     fn fold_eligibility_and_gap_explanations_stay_in_lockstep() {
         let cases: Vec<SubscriptionView> = vec![

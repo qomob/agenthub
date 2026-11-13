@@ -852,6 +852,28 @@ impl Database {
         Ok(())
     }
 
+    /// Run `body` inside one SQLite transaction with `&Self`-style helpers:
+    /// `body` receives a callable that writes settings through the same
+    /// statement as [`Self::set_setting`], and everything commits atomically
+    /// or not at all (used by the optimizer settings save, M2-B).
+    pub fn with_settings_transaction<F>(&self, body: F) -> Result<()>
+    where
+        F: FnOnce(&dyn Fn(&str, &str) -> Result<()>) -> Result<()>,
+    {
+        let tx = self.conn.unchecked_transaction()?;
+        let writer = |key: &str, value: &str| -> Result<()> {
+            tx.execute(
+                "INSERT INTO settings (key, value, updated_at) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                params![key, value, now()],
+            )?;
+            Ok(())
+        };
+        body(&writer)?;
+        tx.commit()?;
+        Ok(())
+    }
+
     // -- agents ------------------------------------------------------------
 
     pub fn upsert_agent(&self, agent: &AgentRecord) -> Result<()> {

@@ -3105,12 +3105,12 @@ fn cmd_cost_settings(ctx: &Ctx) -> CliResult<u8> {
 }
 
 fn cmd_cost_set(ctx: &Ctx, thresholds: &[String], window: Option<String>) -> CliResult<u8> {
-    let mut map: std::collections::BTreeMap<String, i64> = ctx
-        .hub
-        .optimizer_settings()
-        .map_err(|e| CliError::invalid_input(format!("cannot read current settings: {e}")))?
-        .cost_thresholds_minor;
+    // No pre-merge here: the CLI sends exactly the fields the user touched
+    // and the service merges under the runtime lock (M2-B review P1-3).
+    // `--threshold ""` still means "clear the whole table"; otherwise each
+    // --threshold is an upsert of one currency.
     let mut clear_all = false;
+    let mut map: std::collections::BTreeMap<String, i64> = Default::default();
     for spec in thresholds {
         let spec = spec.trim();
         if spec.is_empty() {
@@ -3125,9 +3125,13 @@ fn cmd_cost_set(ctx: &Ctx, thresholds: &[String], window: Option<String>) -> Cli
         })?;
         map.insert(currency.trim().to_uppercase(), minor);
     }
-    if clear_all {
-        map.clear();
-    }
+    let thresholds_arg = if clear_all {
+        Some(std::collections::BTreeMap::new())
+    } else if map.is_empty() {
+        None
+    } else {
+        Some(map)
+    };
     // Option<Option<i64>>: outer None = leave unchanged; inner None = clear
     // back to the engine default; Some(days) = set the window.
     let window_arg: Option<Option<i64>> = match window.as_deref() {
@@ -3146,7 +3150,7 @@ fn cmd_cost_set(ctx: &Ctx, thresholds: &[String], window: Option<String>) -> Cli
     };
     let stored = api_call(
         ApiContext::Inspect,
-        ctx.hub.update_optimizer_settings(Some(map), window_arg),
+        ctx.hub.update_optimizer_settings(thresholds_arg, window_arg),
     )?;
     if ctx.json {
         ctx.emit_api_success(&stored)?;

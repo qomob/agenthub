@@ -3559,11 +3559,20 @@ impl AgentHub {
     /// one validation path, so neither surface can store what the other
     /// cannot read. Only provided fields change; omitted fields keep their
     /// stored value.
+    /// Validate and persist optimizer rule parameters. The whole
+    /// read-merge-validate-save cycle runs under the SAME cross-process
+    /// runtime lock as every other mutating operation (M2-B review P1-3), so
+    /// a concurrent CLI write can never interleave with the GUI's, and a
+    /// caller holding the lock makes this fail busy instead of stomping over
+    /// it. Only provided fields change; omitted fields keep their stored
+    /// value. The CLI therefore never pre-merges the threshold table
+    /// itself — it sends exactly the fields the user touched.
     pub fn update_optimizer_settings(
         &self,
         cost_thresholds_minor: Option<std::collections::BTreeMap<String, i64>>,
         renewal_window_days: Option<Option<i64>>,
     ) -> Result<optimizer::OptimizerSettings> {
+        let _runtime = self.runtime_guard()?;
         let mut current = self.optimizer_settings()?;
         if let Some(thresholds) = cost_thresholds_minor {
             current.cost_thresholds_minor = thresholds;
@@ -3572,17 +3581,18 @@ impl AgentHub {
             current.renewal_window_days = window;
         }
         current.validate()?;
-        self.db.set_setting(
-            optimizer::SETTINGS_KEY_THRESHOLDS,
-            &serde_json::to_string(&current.cost_thresholds_minor)
-                .map_err(|e| Error::invalid_input(format!("cannot serialize thresholds: {e}")))?,
-        )?;
-        match current.renewal_window_days {
-            Some(days) => self
-                .db
-                .set_setting(optimizer::SETTINGS_KEY_WINDOW, &days.to_string())?,
-            None => self.db.set_setting(optimizer::SETTINGS_KEY_WINDOW, "")?,
-        }
+        // Atomic save: one settings-transaction block, not two independent
+        // writes — a crash between them must not leave a half-updated pair.
+        let thresholds_json = serde_json::to_string(&current.cost_thresholds_minor)
+            .map_err(|e| Error::invalid_input(format!("cannot serialize thresholds: {e}")))?;
+        let window_value = match current.renewal_window_days {
+            Some(days) => days.to_string(),
+            None => String::new(),
+        };
+        self.db.with_settings_transaction(|write| {
+            write(optimizer::SETTINGS_KEY_THRESHOLDS, &thresholds_json)?;
+            write(optimizer::SETTINGS_KEY_WINDOW, &window_value)
+        })?;
         Ok(current)
     }
 

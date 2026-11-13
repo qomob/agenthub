@@ -294,8 +294,17 @@ describe('My AI Stack UI', () => {
     await wrapper.findAll('button').find((button) => button.text().includes('手动添加工具'))!.trigger('click')
     await flushPromises()
     await wrapper.find('#stack-name').setValue('')
-    // save without a name shows the validation error and does not call the API
-    const saveButton = wrapper.findAll('button').find((button) => button.text().includes('保存'))!
+    // save without a name shows the validation error and does not call the API.
+    // Target the modal's primary save: the CostInsights panel also has a save
+    // button, so a page-wide text match would hit the wrong one.
+    const saveButton = wrapper
+      .findAll('button')
+      .filter((button) => button.text().includes('保存'))
+      .find(
+        (button) =>
+          button.classes().includes('btn-primary') &&
+          button.attributes('data-testid') !== 'settings-save',
+      )!
     await saveButton.trigger('click')
     await flushPromises()
     expect(wrapper.text()).toContain('名称必填')

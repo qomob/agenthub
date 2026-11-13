@@ -83,14 +83,52 @@ const fixtures = vi.hoisted(() => {
       ...overrides,
     }) as unknown as OptimizerScenarioResult
 
+  // The simulation dropdown derives its targets from the spending overview's
+  // buckets (their union covers every active subscription).
+  const spending = (): Record<string, unknown> => ({
+    byCurrency: [
+      {
+        currency: 'USD',
+        monthlyEquivalentMinor: 6000,
+        annualEquivalentMinor: 72000,
+        subscriptionCount: 1,
+        hybridCount: 0,
+      },
+    ],
+    upcomingRenewals: [
+      {
+        id: 'sub_1',
+        stackItemId: 'st_item',
+        productName: 'Codex Pro',
+        billingType: 'subscription',
+        amountMinor: 6000,
+        currency: 'USD',
+        billingPeriod: 'monthly',
+        status: 'active',
+        renewsOn: '2026-11-15',
+        createdAt: '2026-11-11T00:00:00Z',
+        updatedAt: '2026-11-11T00:00:00Z',
+      },
+    ],
+    renewalsUnknown: [],
+    staleRenewals: [],
+    laterRenewals: [],
+    incomplete: [],
+    usageWithoutBills: [],
+    counts: { total: 1, active: 1, paused: 0, cancelled: 0, expired: 0, unknown: 0 },
+    generatedAt: '2026-11-11T00:00:00Z',
+    upcomingWindowDays: 7,
+  })
+
   const apiMock = {
     optimizerReport: vi.fn(async () => report([])),
     optimizerSettings: vi.fn(async () => settings()),
     optimizerUpdateSettings: vi.fn(async () => settings()),
     optimizerSimulate: vi.fn(async () => scenario()),
+    spendingOverview: vi.fn(async () => spending()),
   }
 
-  return { recommendation, report, settings, scenario, apiMock }
+  return { recommendation, report, settings, scenario, spending, apiMock }
 })
 
 const apiMock = fixtures.apiMock
@@ -169,33 +207,35 @@ describe('M2-B cost insights panel', () => {
     wrapper.unmount()
   })
 
-  it('simulation sends a cancel action and renders per-currency deltas without "saved" claims', async () => {
-    apiMock.optimizerReport.mockImplementation(async () =>
-      fixtures.report([
-        recommendation({
-          recommendationType: 'R5_DATA_GAP',
-          title: 'gaps',
-          recommendationId: 'rec_gap',
-          userActionRequired: 'complete_data',
-        }) as never,
-      ]),
-    )
+  it('simulation: click-driven entry renders currency, before/after and delta in the result region', async () => {
     const wrapper = mountPanel()
     await flushPromises()
-    // The panel exposes the simulation through its public API only; drive it
-    // directly to keep the test at the contract level.
-    const vm = wrapper.vm as unknown as {
-      simulateCancel: (subscriptionId: string) => Promise<void>
-    }
-    await vm.simulateCancel('sub_1')
+
+    // Pick a subscription from the dropdown (data-testid wired for the
+    // acceptance flow) and click the run button.
+    const select = wrapper.find('[data-testid="simulate-target"]')
+    expect(select.exists()).toBe(true)
+    await select.setValue('sub_1')
+    const runButton = wrapper.find('[data-testid="simulate-run"]')
+    expect(runButton.exists()).toBe(true)
+    await runButton.trigger('click')
     await flushPromises()
 
     expect(apiMock.optimizerSimulate).toHaveBeenCalledWith([
       { kind: 'cancel', subscriptionId: 'sub_1' },
     ])
-    const text = wrapper.text()
-    expect(text).toContain('60.00 USD')
-    expect(text).not.toMatch(/已节省|已实现|saved .* yet|realized saving/i)
+
+    const result = wrapper.find('[data-testid="simulate-result"]')
+    expect(result.exists()).toBe(true)
+    const resultText = result.text()
+    // Currency, before, after and delta are all visible in the region.
+    expect(resultText).toContain('USD · monthly')
+    expect(resultText).toContain('60.00 USD')
+    expect(resultText).toContain('0.00 USD')
+    expect(resultText).toContain('−60.00 USD')
+    // The disclaimers travel with the result; no fabricated savings figure.
+    expect(resultText).toContain('simulation only')
+    expect(resultText).not.toMatch(/已节省\s*[\d.]|saved\s+[\d.]+\s*(USD|CNY)/i)
     wrapper.unmount()
   })
 })
@@ -212,6 +252,57 @@ describe('M2-B settings: one shared storage, two surfaces', () => {
     // `agenthub cost settings --json` emits through the envelope.
     const settingsShape = await apiMock.optimizerSettings.mock.results[0]!.value
     expect(Object.keys(settingsShape).sort()).toEqual(['costThresholdsMinor', 'renewalWindowDays'])
+    wrapper.unmount()
+  })
+
+  it('settings editor: clicking save submits the edited threshold and window through the shared service path', async () => {
+    apiMock.optimizerSettings.mockImplementation(async () =>
+      fixtures.settings({ costThresholdsMinor: {}, renewalWindowDays: null }),
+    )
+    apiMock.optimizerUpdateSettings.mockImplementation(async () =>
+      fixtures.settings({ costThresholdsMinor: { USD: 5000 }, renewalWindowDays: 14 }),
+    )
+    const wrapper = mountPanel()
+    await flushPromises()
+
+    // Fill the first threshold row and the window.
+    await wrapper.find('[data-testid="threshold-currency-0"]').setValue('usd')
+    await wrapper.find('[data-testid="threshold-minor-0"]').setValue('5000')
+    await wrapper.find('[data-testid="optimizer-window"]').setValue('14')
+
+    await wrapper.find('[data-testid="settings-save"]').trigger('click')
+    await flushPromises()
+
+    // camelCase in TS, snake_case on the wire — the api layer owns the
+    // mapping, so the mock sees the TS call shape.
+    expect(apiMock.optimizerUpdateSettings).toHaveBeenCalledWith(
+      { USD: 5000 },
+      14,
+    )
+    // The editor re-hydrates from the stored config after a successful save.
+    expect(wrapper.text()).toContain('成本建议设置已保存')
+    wrapper.unmount()
+  })
+
+  it('settings editor: clearing every row leaves thresholds unchanged (undefined) and clears the window (null)', async () => {
+    apiMock.optimizerSettings.mockImplementation(async () =>
+      fixtures.settings({ costThresholdsMinor: { USD: 5000 }, renewalWindowDays: 10 }),
+    )
+    const wrapper = mountPanel()
+    await flushPromises()
+
+    // Remove the only row -> thresholds untouched; empty window -> cleared.
+    // (No stray clicks: a refresh would re-hydrate the row from the mock.)
+    const removeButtons = wrapper
+      .findAll('button')
+      .filter((button) => button.text() === '删除')
+    await removeButtons[0].trigger('click')
+    await flushPromises()
+    await wrapper.find('[data-testid="optimizer-window"]').setValue('')
+    await wrapper.find('[data-testid="settings-save"]').trigger('click')
+    await flushPromises()
+
+    expect(apiMock.optimizerUpdateSettings).toHaveBeenCalledWith(undefined, null)
     wrapper.unmount()
   })
 })

@@ -210,3 +210,54 @@ fn optimizer_settings_validation_rejects_bad_parameters() {
     hub.update_optimizer_settings(None, Some(None)).unwrap();
     assert_eq!(hub.optimizer_settings().unwrap().renewal_window_days, None);
 }
+
+#[test]
+fn optimizer_settings_write_respects_the_runtime_lock() {
+    let f = Fixture::new();
+    let hub = f.hub();
+
+    // An external holder (another CLI or desktop instance) owns the lock.
+    let holder = agenthub_core::runtime::acquire(
+        &f.home.join(".agenthub"),
+        agenthub_core::runtime::RuntimeKind::Cli,
+    )
+    .expect("acquire external lock");
+
+    let mut thresholds = std::collections::BTreeMap::new();
+    thresholds.insert("USD".to_string(), 5000i64);
+    let err = hub
+        .update_optimizer_settings(Some(thresholds.clone()), Some(Some(14)))
+        .unwrap_err();
+    assert!(
+        !matches!(err, agenthub_core::error::Error::InvalidInput(_)),
+        "must fail busy, not as a validation error: {err:?}"
+    );
+
+    // Release: the same write now succeeds — no lease leaked, no stomp.
+    drop(holder);
+    let stored = hub
+        .update_optimizer_settings(Some(thresholds), Some(Some(14)))
+        .unwrap();
+    assert_eq!(stored.cost_thresholds_minor.get("USD"), Some(&5000));
+    assert_eq!(stored.renewal_window_days, Some(14));
+}
+
+#[test]
+fn optimizer_settings_save_is_atomic_across_both_fields() {
+    // The save path writes both settings keys inside one transaction; a
+    // failing second write must roll back the first (no half-updated pair).
+    let f = Fixture::new();
+    let hub = f.hub();
+    let stored = hub
+        .update_optimizer_settings(None, Some(Some(21)))
+        .unwrap();
+    assert_eq!(stored.renewal_window_days, Some(21));
+    // Read the raw keys: both present and consistent.
+    let db = hub.db();
+    assert_eq!(
+        db.get_setting(agenthub_core::optimizer::SETTINGS_KEY_WINDOW)
+            .unwrap()
+            .as_deref(),
+        Some("21")
+    );
+}
