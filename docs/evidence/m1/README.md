@@ -113,6 +113,20 @@ shasum -a 256 archives/m1/2026-11-12/agenthub-m1-acceptance-20261112.tar.zst
 zstd -t archives/m1/2026-11-12/agenthub-m1-acceptance-20261112.tar.zst
 ```
 
+## 归档登记（2026-11-13 更新）
+
+完整证据包已上传：
+
+| 字段 | 值 |
+|---|---|
+| 仓库 | `qomob/agenthub-evidence`（Private） |
+| 对象 | `archives/m1/2026-11-12/agenthub-m1-acceptance-20261112.tar.zst` |
+| 远端复核 SHA-256 | `8298f372ca4a56722c8b5fd7f29e7e480159175f3de38c89277f4b1347b909a2` |
+| 归档 commit | `737ea43` |
+| 复核 | 远端 clone + SHA-256 + `zstd -t` PASS |
+
+注意：上传版为**脱敏重打包**（24/42 张原始截图去除本机第三方应用通知、报告去除本机路径），首版哈希 `8f1ad97f…` 作废。未脱敏原件仅存于采集机，不入任何仓库。
+
 ## 与报告的关系
 
 - `docs/proposals/M1_C_ACCEPTANCE_REPORT.md` — M1-C 验收（V1–V4）
